@@ -4,27 +4,43 @@ import numpy as np
 import logging
 import sys
 import torch
-from ignite.engine import Events, create_supervised_trainer, create_supervised_evaluator
+import argparse
+import random
 
 import monai
 from monai import config
-from monai.data import Dataset, DataLoader, GridPatchDataset, CacheDataset
+from monai.data import Dataset, DataLoader, GridPatchDataset, CacheDataset, PersistentDataset
 from monai.transforms import (Compose, LoadNiftid, Orientationd, ScaleIntensityd,
-                              AddChanneld, ToTensord, CropForegroundd, Spacingd, RandSpatialCropSamplesd, AsDiscreted)
+                              AddChanneld, ToTensord, CropForegroundd, Spacingd, RandSpatialCropSamplesd,
+                              RandAffined, RandCropByPosNegLabeld, AsDiscreted)
 from monai.handlers import (StatsHandler, TensorBoardStatsHandler, TensorBoardImageHandler,
-                            MeanDice, CheckpointSaver)
+                            MeanDice, CheckpointSaver, CheckpointLoader, SegmentationSaver,
+                            ValidationHandler)
 from monai.networks import predict_segmentation
 from monai.networks.nets import UNet
 from monai.networks.layers import Norm
-from monai.losses import DiceLoss
+from monai.losses import DiceLoss, GeneralizedDiceLoss
 from monai.inferers import SlidingWindowInferer
-from monai.engines import SupervisedTrainer
+from monai.engines import SupervisedTrainer, SupervisedEvaluator
 
+from torch.utils.tensorboard import SummaryWriter
 
-def main():
-    config.print_config()
+def parse_args():
+    parser = argparse.ArgumentParser(description='DeepMV training')
 
-    path = Path("D:/pcarnahanfiles/Tensorflow/MVData/nifty")
+    subparsers = parser.add_subparsers(help='sub-command help', dest='mode')
+    subparsers.required = True
+
+    train_parse = subparsers.add_parser('train', help="Train the network")
+    train_parse.add_argument('-load', type=str, help='load from a given checkpoint')
+
+    seg_parse = subparsers.add_parser('segment', help='Evaluate the network')
+    seg_parse.add_argument('load', type=str, help='load from a given checkpoint')
+
+    return parser.parse_args()
+
+def load_train_data(path, device=torch.device('cpu')):
+    path = Path(path)
 
     images = sorted(str(p.absolute()) for p in path.glob("*US.nii"))
     segs = sorted(str(p.absolute()) for p in path.glob("*label.nii"))
@@ -35,62 +51,101 @@ def main():
     xform = Compose([
         LoadNiftid(keys),
         AddChanneld(keys),
-        Spacingd(keys, 0.7, diagonal=True, mode=('bilinear', 'nearest')),
+        Spacingd(keys, 0.5, diagonal=True, mode=('bilinear', 'nearest')),
         Orientationd(keys, axcodes='RAS'),
         ScaleIntensityd("image"),
         CropForegroundd(keys, source_key="image"),
-        RandSpatialCropSamplesd(keys, (96,96,96), 8, random_size=False),
+        # RandAffined(keys, mode=('bilinear', 'nearest'), rotate_range=(0.1,0.1,0.1), scale_range=(0.05,0.05,0.05), prob=0.05, device=device),
+        # RandSpatialCropSamplesd(keys, (96,96,96), 7, random_size=False),
+        RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(96,96,96), pos=0.8, neg=0.2, num_samples=7),
         ToTensord(keys)
     ])
-    # imtrans = Compose([
-    #     LoadNifti(image_only=True),
-    #     ScaleIntensity(),
-    #     AddChannel(),
-    #     ToTensor()
-    # ])
-    # segtrans = Compose([
-    #     LoadNifti(image_only=True),
-    #     AddChannel(),
-    #     ToTensor()
-    # ])
 
-    # ds = ArrayDataset(images, imtrans, segs, segtrans)
-    # ds = Dataset(d, xform)
-    ds = CacheDataset(d, xform)
-    loader = DataLoader(ds,  batch_size=4, shuffle=True, num_workers=0, pin_memory=torch.cuda.is_available())
-    im = monai.utils.misc.first(loader)
-    print(im["image"].shape)
+    # ds = CacheDataset(d, xform)
+    persistent_cache = Path("./persistent_cache")
+    persistent_cache.mkdir(parents=True, exist_ok=True)
+    ds = PersistentDataset(d, xform, persistent_cache)
+    loader = DataLoader(ds, batch_size=4, shuffle=True, num_workers=0, drop_last=True)
+
+    return loader
+
+def load_seg_data(path):
+    path = Path(path)
+
+    random.seed(0)
+    images = sorted(str(p.absolute()) for p in path.glob("*US.nii"))
+    segs = sorted(str(p.absolute()) for p in path.glob("*label.nii"))
+    d = [{"image": im, "label": seg} for im, seg in zip(images, segs)]
+    keys = ("image", "label")
+
+    # Define transforms for image and segmentation
+    xform = Compose([
+        LoadNiftid(keys),
+        AddChanneld(keys),
+        Spacingd(keys, 0.5, diagonal=True, mode=('bilinear', 'nearest')),
+        Orientationd(keys, axcodes='RAS'),
+        ScaleIntensityd("image"),
+        CropForegroundd(keys, source_key="image"),
+        ToTensord(keys)
+    ])
+
+    # ds = CacheDataset(d, xform)
+    persistent_cache = Path("./persistent_cache")
+    persistent_cache.mkdir(parents=True, exist_ok=True)
+    ds = PersistentDataset(d, xform, persistent_cache)
+    loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=0, pin_memory=torch.cuda.is_available())
+
+    return loader
+
+
+def train(args):
+    config.print_config()
 
     device = torch.device('cuda:0')
+    loader = load_train_data("D:/pcarnahanfiles/Tensorflow/MVData/data/train", device)
+
     net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
-               strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH).to(device)
-    loss = DiceLoss(sigmoid=True)
-    opt = torch.optim.Adam(net.parameters(), 1e-2)
+               strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0.05).to(device)
+    loss = GeneralizedDiceLoss(sigmoid=True)
+    opt = torch.optim.Adam(net.parameters(), 1e-3)
 
     # trainer = create_supervised_trainer(net, opt, loss, device, False, )
     trainer = SupervisedTrainer(
         device=device,
-        max_epochs=500,
+        max_epochs=1500,
         train_data_loader=loader,
         network=net,
         optimizer=opt,
         loss_function=loss,
         # inferer=SlidingWindowInferer((64, 64, 64), sw_batch_size=6),
-        # post_transform=AsDiscreted(keys=["pred", "label"], argmax=(True, False), to_onehot=False, n_classes=2),
-        key_train_metric={"train_meandice": MeanDice(output_transform=lambda x: (x["pred"], x["label"]))},
+        # post_transform=AsDiscreted(keys=["pred"], threshold_values=True, logit_thresh=0),
+        key_train_metric={"train_meandice": MeanDice(sigmoid=True,output_transform=lambda x: (x["pred"], x["label"]))},
     )
+
+    # Load checkpoint if defined
+    if args.load:
+        checkpoint = torch.load(args.load)
+        if checkpoint['trainer']:
+            for k in checkpoint['trainer']:
+                trainer.state.__dict__[k] = checkpoint['trainer'][k]
+            trainer.state.epoch = trainer.state.iteration // trainer.state.epoch_length
+        checkpoint_loader = CheckpointLoader(args.load, {'net': net, 'opt': opt})
+        checkpoint_loader.attach(trainer)
+
+        logdir = Path(args.load).parent
+
+    else:
+        logdir = Path('./runs/')
+        dirs = sorted([int(x.name) for x in logdir.iterdir() if x.is_dir()])
+        if not dirs:
+            logdir = logdir.joinpath('0')
+        else:
+            logdir = logdir.joinpath(str(int(dirs[-1]) + 1))
 
     ### optional section for checkpoint and tensorboard logging
     # adding checkpoint handler to save models (network params and optimizer stats) during training
-    logdir = Path('./runs/')
-    dirs = sorted([x.name for x in logdir.iterdir() if x.is_dir()])
-    if not dirs:
-        run = 0
-    else:
-        run = int(dirs[-1]) + 1
-
-    checkpoint_handler = CheckpointSaver('./runs/{}'.format(run), {'net': net, 'opt': opt}, n_saved=10, save_final=True,
-                                         save_key_metric=True, key_metric_n_saved=5, epoch_level=True, save_interval=2)
+    checkpoint_handler = CheckpointSaver(logdir, {'net': net, 'opt': opt, 'trainer': trainer}, n_saved=10, save_final=True,
+                                         epoch_level=True, save_interval=10)
     checkpoint_handler.attach(trainer)
 
     # StatsHandler prints loss at every iteration and print metrics at every epoch,
@@ -100,13 +155,100 @@ def main():
     train_stats_handler.attach(trainer)
 
     # TensorBoardStatsHandler plots loss at every iteration and plots metrics at every epoch, same as StatsHandler
-    train_tensorboard_stats_handler = TensorBoardStatsHandler(log_dir='./runs/{}'.format(run))
+    tb_writer = SummaryWriter(log_dir=logdir)
+    train_tensorboard_stats_handler = TensorBoardStatsHandler(summary_writer=tb_writer)
     train_tensorboard_stats_handler.attach(trainer)
+
+    # Set up validation step
+    val_loader = load_seg_data("D:/pcarnahanfiles/Tensorflow/MVData/data/val")
+
+    evaluator = SupervisedEvaluator(
+        device=device,
+        val_data_loader=val_loader,
+        network=net,
+        inferer=SlidingWindowInferer((96, 96, 96), sw_batch_size=6),
+        # post_transform=AsDiscreted(keys=["pred", "label"], argmax=(True, False), to_onehot=False, n_classes=2),
+        key_val_metric={"val_meandice": MeanDice(sigmoid=True, output_transform=lambda x: (x["pred"], x["label"]))},
+    )
+
+    val_stats_handler = StatsHandler(
+        name='evaluator',
+        global_epoch_transform=lambda x: trainer.state.epoch)  # fetch global epoch number from trainer
+    val_stats_handler.attach(evaluator)
+
+    # add handler to record metrics to TensorBoard at every validation epoch
+    val_tensorboard_stats_handler = TensorBoardStatsHandler(
+        summary_writer=tb_writer,
+        # output_transform=lambda x: None,  # no need to plot loss value, so disable per iteration output
+        global_epoch_transform=lambda x: trainer.state.epoch)  # fetch global epoch number from trainer
+    val_tensorboard_stats_handler.attach(evaluator)
+
+    # add handler to draw the first image and the corresponding label and model output in the last batch
+    # here we draw the 3D output as GIF format along Depth axis, at every validation epoch
+    val_tensorboard_image_handler = TensorBoardImageHandler(
+        summary_writer=tb_writer,
+        batch_transform=lambda batch: (batch["image"], batch["label"]),
+        output_transform=lambda output: predict_segmentation(output['pred']),
+        global_iter_transform=lambda x: trainer.state.epoch
+    )
+    val_tensorboard_image_handler.attach(evaluator)
+
+    val_handler = ValidationHandler(
+        validator=evaluator,
+        interval=10
+    )
+    val_handler.attach(trainer)
 
     logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
     trainer.run()
 
 
+def segment(args):
+    config.print_config()
+
+    loader = load_seg_data("D:/pcarnahanfiles/Tensorflow/MVData/data/val")
+    batch = monai.utils.first(loader)
+
+    device = torch.device('cuda:0')
+    net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
+               strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH).to(device)
+
+    # def prepare_batch(batch, device=None, non_blocking=False):
+    #     return _prepare_batch((batch["image"], batch["label"]), device, non_blocking)
+
+    evaluator = SupervisedEvaluator(
+        device=device,
+        val_data_loader=loader,
+        network=net,
+        inferer=SlidingWindowInferer((96,96,96), sw_batch_size=6),
+        # post_transform=AsDiscreted(keys=["pred", "label"], argmax=(True, False), to_onehot=False, n_classes=2),
+        key_val_metric={"val_meandice": MeanDice(sigmoid=True,output_transform=lambda x: (x["pred"], x["label"]))},
+    )
+
+    checkpoint_loader = CheckpointLoader(args.load, {'net': net})
+    checkpoint_loader.attach(evaluator)
+
+    logdir = Path(args.load).parent.joinpath('out')
+
+    # add stats event handler to print validation stats via evaluator
+    val_stats_handler = StatsHandler(
+        name="evaluator")
+    val_stats_handler.attach(evaluator)
+
+    prediction_saver = SegmentationSaver(
+        output_dir=logdir,
+        name="evaluator",
+        batch_transform=lambda batch: batch["image_meta_dict"],
+        output_transform=lambda output: predict_segmentation(output['pred'])
+    )
+    prediction_saver.attach(evaluator)
+
+    evaluator.run()
+
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    if args.mode == 'segment':
+        segment(args)
+    elif args.mode == 'train':
+        train(args)
