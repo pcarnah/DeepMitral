@@ -56,7 +56,6 @@ def load_train_data(path, device=torch.device('cpu')):
         ScaleIntensityd("image"),
         CropForegroundd(keys, source_key="image"),
         # RandAffined(keys, mode=('bilinear', 'nearest'), rotate_range=(0.1,0.1,0.1), scale_range=(0.05,0.05,0.05), prob=0.05, device=device),
-        # RandSpatialCropSamplesd(keys, (96,96,96), 7, random_size=False),
         RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(96,96,96), pos=0.8, neg=0.2, num_samples=7),
         ToTensord(keys)
     ])
@@ -102,7 +101,7 @@ def train(args):
     config.print_config()
 
     device = torch.device('cuda:0')
-    loader = load_train_data("D:/pcarnahanfiles/Tensorflow/MVData/data/train", device)
+    loader = load_train_data("U:/Documents/DeepMV/data/train", device)
 
     net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
                strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0.05).to(device)
@@ -117,8 +116,6 @@ def train(args):
         network=net,
         optimizer=opt,
         loss_function=loss,
-        # inferer=SlidingWindowInferer((64, 64, 64), sw_batch_size=6),
-        # post_transform=AsDiscreted(keys=["pred"], threshold_values=True, logit_thresh=0),
         key_train_metric={"train_meandice": MeanDice(sigmoid=True,output_transform=lambda x: (x["pred"], x["label"]))},
     )
 
@@ -148,38 +145,43 @@ def train(args):
                                          epoch_level=True, save_interval=10)
     checkpoint_handler.attach(trainer)
 
-    # StatsHandler prints loss at every iteration and print metrics at every epoch,
-    # we don't set metrics for trainer here, so just print loss, user can also customize print functions
-    # and can use output_transform to convert engine.state.output if it's not a loss value
-    train_stats_handler = StatsHandler(name='trainer')
+    # StatsHandler prints loss at every iteration and print metrics at every epoch
+    train_stats_handler = StatsHandler(
+        name='trainer',
+        output_transform=lambda x: x['loss'])
     train_stats_handler.attach(trainer)
 
-    # TensorBoardStatsHandler plots loss at every iteration and plots metrics at every epoch, same as StatsHandler
     tb_writer = SummaryWriter(log_dir=logdir)
-    train_tensorboard_stats_handler = TensorBoardStatsHandler(summary_writer=tb_writer)
+    tb_writer.add_graph(net, monai.utils.first(loader)['image'].to(device))
+
+    # TensorBoardStatsHandler plots loss at every iteration and plots metrics at every epoch, same as StatsHandler
+    train_tensorboard_stats_handler = TensorBoardStatsHandler(
+        summary_writer=tb_writer,
+        output_transform=lambda x: x['loss'],
+        tag_name='loss')
     train_tensorboard_stats_handler.attach(trainer)
 
     # Set up validation step
-    val_loader = load_seg_data("D:/pcarnahanfiles/Tensorflow/MVData/data/val")
+    val_loader = load_seg_data("U:/Documents/DeepMV/data/val")
 
     evaluator = SupervisedEvaluator(
         device=device,
         val_data_loader=val_loader,
         network=net,
         inferer=SlidingWindowInferer((96, 96, 96), sw_batch_size=6),
-        # post_transform=AsDiscreted(keys=["pred", "label"], argmax=(True, False), to_onehot=False, n_classes=2),
         key_val_metric={"val_meandice": MeanDice(sigmoid=True, output_transform=lambda x: (x["pred"], x["label"]))},
     )
 
     val_stats_handler = StatsHandler(
         name='evaluator',
+        output_transform=lambda x: None,  # no need to plot loss value, so disable per iteration output
         global_epoch_transform=lambda x: trainer.state.epoch)  # fetch global epoch number from trainer
     val_stats_handler.attach(evaluator)
 
     # add handler to record metrics to TensorBoard at every validation epoch
     val_tensorboard_stats_handler = TensorBoardStatsHandler(
         summary_writer=tb_writer,
-        # output_transform=lambda x: None,  # no need to plot loss value, so disable per iteration output
+        output_transform=lambda x: None,  # no need to plot loss value, so disable per iteration output
         global_epoch_transform=lambda x: trainer.state.epoch)  # fetch global epoch number from trainer
     val_tensorboard_stats_handler.attach(evaluator)
 
@@ -207,22 +209,18 @@ def train(args):
 def segment(args):
     config.print_config()
 
-    loader = load_seg_data("D:/pcarnahanfiles/Tensorflow/MVData/data/val")
+    loader = load_seg_data("U:/Documents/DeepMV/data/val")
     batch = monai.utils.first(loader)
 
     device = torch.device('cuda:0')
     net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
                strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH).to(device)
 
-    # def prepare_batch(batch, device=None, non_blocking=False):
-    #     return _prepare_batch((batch["image"], batch["label"]), device, non_blocking)
-
     evaluator = SupervisedEvaluator(
         device=device,
         val_data_loader=loader,
         network=net,
         inferer=SlidingWindowInferer((96,96,96), sw_batch_size=6),
-        # post_transform=AsDiscreted(keys=["pred", "label"], argmax=(True, False), to_onehot=False, n_classes=2),
         key_val_metric={"val_meandice": MeanDice(sigmoid=True,output_transform=lambda x: (x["pred"], x["label"]))},
     )
 
@@ -233,7 +231,9 @@ def segment(args):
 
     # add stats event handler to print validation stats via evaluator
     val_stats_handler = StatsHandler(
-        name="evaluator")
+        name="evaluator",
+        output_transform=lambda x: None,
+        global_epoch_transform=lambda x: 0)
     val_stats_handler.attach(evaluator)
 
     prediction_saver = SegmentationSaver(
@@ -245,6 +245,7 @@ def segment(args):
     prediction_saver.attach(evaluator)
 
     evaluator.run()
+    print(evaluator.get_validation_stats())
 
 if __name__ == "__main__":
     args = parse_args()
