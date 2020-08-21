@@ -40,3 +40,208 @@ Run 13 - Val mean dice 0.83 at epoch 1390 (0.81 at epoch 1500):
 	opt = torch.optim.Adam(net.parameters(), 1e-3)
 
 	Notes: 
+	
+	
+	
+Run 14 - Val mean dice 0.82 at epoch 890 (0.81 at 1500)
+	xform = Compose([
+        LoadNiftid(keys),
+        AddChanneld(keys),
+        Spacingd(keys, 0.5, diagonal=True, mode=('bilinear', 'nearest')),
+        Orientationd(keys, axcodes='RAS'),
+        ScaleIntensityd("image"),
+        CropForegroundd(keys, source_key="image"),
+        # RandAffined(keys, mode=('bilinear', 'nearest'), rotate_range=(0.1,0.1,0.1), scale_range=(0.05,0.05,0.05), prob=0.05, device=device),
+        RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(96,96,96), pos=0.8, neg=0.2, num_samples=7),
+        ToTensord(keys)
+    ])
+	net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
+               strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0.25).to(device)
+    loss = GeneralizedDiceLoss(sigmoid=True)
+    opt = torch.optim.Adam(net.parameters(), 1e-3)
+	
+	Notes: Increased dropout led to worse training error, however little to no change in validation performance (batch norm may make dropout unecessary)
+	
+	
+Run 15 - Val mean dice 0.825 at epoch 830 (0.807 at 1500)
+	xform = Compose([
+        LoadNiftid(keys),
+        AddChanneld(keys),
+        Spacingd(keys, 0.5, diagonal=True, mode=('bilinear', 'nearest')),
+        Orientationd(keys, axcodes='RAS'),
+        ScaleIntensityd("image"),
+        CropForegroundd(keys, source_key="image"),
+        # RandAffined(keys, mode=('bilinear', 'nearest'), rotate_range=(0.1,0.1,0.1), scale_range=(0.05,0.05,0.05), prob=0.05, device=device),
+        RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(96,96,96), pos=0.8, neg=0.2, num_samples=7),
+        ToTensord(keys)
+    ])
+	net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
+               strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0).to(device)
+    loss = GeneralizedDiceLoss(sigmoid=True)
+    opt = torch.optim.Adam(net.parameters(), 1e-3)
+	
+	Notes: No dropout results in approx same validation error, better training error. Some disconnected pieces appear.
+	
+	
+Run 18 - Val mean dice 0.827 at epoch 1190 (0.813 at 1500)
+	xform = Compose([
+        LoadNiftid(keys),
+        AddChanneld(keys),
+        Spacingd(keys, 0.5, diagonal=True, mode=('bilinear', 'nearest')),
+        Orientationd(keys, axcodes='RAS'),
+        ScaleIntensityd("image"),
+        CropForegroundd(keys, source_key="image"),
+        RandAffined(keys, mode=('bilinear', 'nearest'), rotate_range=(0.1,0.1,0.1), scale_range=(0.05,0.05,0.05), prob=0.2, as_tensor_output=False, device=device),
+        RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(96,96,96), pos=0.8, neg=0.2, num_samples=7),
+        ToTensord(keys)
+    ])
+	net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
+               strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0).to(device)
+    loss = GeneralizedDiceLoss(sigmoid=True)
+    opt = torch.optim.Adam(net.parameters(), 1e-3)
+	
+	Notes: Spatial transformation has little impact. Possibly helps with leaflet length. Some disconnected pieces appear.
+			After removing disconnected componenents, we see improvement in Dice and Hausdorff over Run 13 and Run 15 on 022 and 058, but Run 13 is better on 033 and 038.
+	
+
+Run 19 - Val mean dice 0.827 at epoch 660 (0.788 at 1500)
+	xform = Compose([
+        LoadNiftid(keys),
+        AddChanneld(keys),
+        Spacingd(keys, 0.5, diagonal=True, mode=('bilinear', 'nearest')),
+        Orientationd(keys, axcodes='RAS'),
+        ScaleIntensityd("image"),
+        CropForegroundd(keys, source_key="image"),
+        #RandAffined(keys, mode=('bilinear', 'nearest'), rotate_range=(0.15,0.15,0.15), scale_range=(0.05,0.05,0.05), prob=0.2, as_tensor_output=False, device=device),
+        Rand3DElasticd(keys, mode=('bilinear', 'nearest'),  rotate_range=(0.15,0.15,0.15), scale_range=(0.05,0.05,0.05),
+                       sigma_range=(0,1), magnitude_range=(0,2), prob=0.2, as_tensor_output=False, device=device),
+        RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(96,96,96), pos=0.8, neg=0.2, num_samples=7),
+        ToTensord(keys)
+    ])
+	net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
+               strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0).to(device)
+    loss = GeneralizedDiceLoss(sigmoid=True)
+    opt = torch.optim.Adam(net.parameters(), 1e-3)
+	
+	Notes: Testing elastic deformation.
+
+
+Run 21 - Val mean dice 0.814 at epoch 120 (0.798 at 1500)
+	xform = Compose([
+			LoadNiftid(keys),
+			AddChanneld(keys),
+			Spacingd(keys, 0.5, diagonal=True, mode=('bilinear', 'nearest')),
+			Orientationd(keys, axcodes='RAS'),
+			ScaleIntensityd("image"),
+			CropForegroundd(keys, source_key="image"),
+			RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(96,96,96), pos=0.8, neg=0.2, num_samples=7),
+			ToTensord(keys)
+		])
+	net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
+               strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0).to(device)
+    loss = GeneralizedDiceLoss(sigmoid=True)
+    opt = torch.optim.Adam(net.parameters(), 1e-3)
+	
+	lr_scheduler = StepLR(opt, 400)
+	
+	Notes: Testing no LR scheduling with 400 epoch step
+	
+
+Run 22 - Val mean dice 0.813 at epoch 620 (0.811 at 800)
+	xform = Compose([
+			LoadNiftid(keys),
+			AddChanneld(keys),
+			Spacingd(keys, 0.5, diagonal=True, mode=('bilinear', 'nearest')),
+			Orientationd(keys, axcodes='RAS'),
+			ScaleIntensityd("image"),
+			CropForegroundd(keys, source_key="image"),
+			RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(96,96,96), pos=0.8, neg=0.2, num_samples=7),
+			ToTensord(keys)
+		])
+	net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
+               strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0.1).to(device)
+    loss = GeneralizedDiceLoss(sigmoid=True)
+    opt = torch.optim.Adam(net.parameters(), 1e-2)
+
+    # trainer = create_supervised_trainer(net, opt, loss, device, False, )
+    trainer = SupervisedTrainer(
+        device=device,
+        max_epochs=800,
+        train_data_loader=loader,
+        network=net,
+        optimizer=opt,
+        loss_function=loss,
+        key_train_metric={"train_meandice": MeanDice(sigmoid=True,output_transform=lambda x: (x["pred"], x["label"]))},
+    )
+	
+	lr_scheduler = StepLR(opt, 200)
+
+	
+Run 23 - Val mean dice 0.807 at epoch 330 (0.797 at 800)
+	xform = Compose([
+			LoadNiftid(keys),
+			AddChanneld(keys),
+			Spacingd(keys, 0.5, diagonal=True, mode=('bilinear', 'nearest')),
+			Orientationd(keys, axcodes='RAS'),
+			ScaleIntensityd("image"),
+			CropForegroundd(keys, source_key="image"),
+			RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(96,96,96), pos=0.8, neg=0.2, num_samples=7),
+			ToTensord(keys)
+		])
+	net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
+               strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0).to(device)
+    loss = GeneralizedDiceLoss(sigmoid=True)
+    opt = torch.optim.Adam(net.parameters(), 1e-2)
+
+    # trainer = create_supervised_trainer(net, opt, loss, device, False, )
+    trainer = SupervisedTrainer(
+        device=device,
+        max_epochs=800,
+        train_data_loader=loader,
+        network=net,
+        optimizer=opt,
+        loss_function=loss,
+        key_train_metric={"train_meandice": MeanDice(sigmoid=True,output_transform=lambda x: (x["pred"], x["label"]))},
+    )
+	
+	lr_scheduler = StepLR(opt, 200)
+	
+	Note: Scheduler with no dropout plateaus lower than with dropout
+	
+	
+Run 24 - Val mean dice 0.801 at epoch 560 (0.80 at 800)
+	xform = Compose([
+			LoadNiftid(keys),
+			AddChanneld(keys),
+			Spacingd(keys, 0.5, diagonal=True, mode=('bilinear', 'nearest')),
+			Orientationd(keys, axcodes='RAS'),
+			ScaleIntensityd("image"),
+			CropForegroundd(keys, source_key="image"),
+			RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(96,96,96), pos=0.8, neg=0.2, num_samples=7),
+			ToTensord(keys)
+		])
+	net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
+               strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0.25).to(device)
+    loss = GeneralizedDiceLoss(sigmoid=True)
+    opt = torch.optim.Adam(net.parameters(), 1e-2)
+
+    # trainer = create_supervised_trainer(net, opt, loss, device, False, )
+    trainer = SupervisedTrainer(
+        device=device,
+        max_epochs=800,
+        train_data_loader=loader,
+        network=net,
+        optimizer=opt,
+        loss_function=loss,
+        key_train_metric={"train_meandice": MeanDice(sigmoid=True,output_transform=lambda x: (x["pred"], x["label"]))},
+    )
+	
+	lr_scheduler = StepLR(opt, 200)
+	
+	Note: Slightly worse performance than 0.1 dropout
+
+
+Things to test: LR Scheduling (step, plateau)
+	
+	
+	
