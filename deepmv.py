@@ -17,7 +17,7 @@ from monai.handlers import (StatsHandler, TensorBoardStatsHandler, TensorBoardIm
                             MeanDice, CheckpointSaver, CheckpointLoader, SegmentationSaver,
                             ValidationHandler, LrScheduleHandler)
 from monai.networks import predict_segmentation
-from monai.networks.nets import UNet
+from monai.networks.nets import *
 from monai.networks.layers import Norm
 from monai.losses import DiceLoss, GeneralizedDiceLoss
 from monai.inferers import SlidingWindowInferer
@@ -64,7 +64,7 @@ def load_train_data(path, device=torch.device('cpu')):
         #RandAffined(keys, mode=('bilinear', 'nearest'), rotate_range=(0.15,0.15,0.15), scale_range=(0.05,0.05,0.05), prob=0.2, as_tensor_output=False, device=device),
         # Rand3DElasticd(keys, mode=('bilinear', 'nearest'),  rotate_range=(0.15,0.15,0.15), scale_range=(0.05,0.05,0.05),
         #                sigma_range=(0,1), magnitude_range=(0,2), prob=0.2, as_tensor_output=False, device=device),
-        RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(96,96,96), pos=0.8, neg=0.2, num_samples=7),
+        RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(96,96,96), pos=0.8, neg=0.2, num_samples=4),
         ToTensord(keys)
     ])
 
@@ -72,7 +72,7 @@ def load_train_data(path, device=torch.device('cpu')):
     persistent_cache = Path("./persistent_cache")
     persistent_cache.mkdir(parents=True, exist_ok=True)
     ds = PersistentDataset(d, xform, persistent_cache)
-    loader = DataLoader(ds, batch_size=4, shuffle=True, num_workers=0, drop_last=True)
+    loader = DataLoader(ds, batch_size=7, shuffle=True, num_workers=0, drop_last=True)
 
     return loader
 
@@ -140,14 +140,14 @@ def train(args):
     loader = load_train_data("U:/Documents/DeepMV/data/train", device)
 
     net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
-               strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0).to(device)
+               strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0.05).to(device)
     loss = GeneralizedDiceLoss(sigmoid=True)
-    opt = torch.optim.Adam(net.parameters(), 1e-2)
+    opt = torch.optim.Adam(net.parameters(), 1e-3)
 
     # trainer = create_supervised_trainer(net, opt, loss, device, False, )
     trainer = SupervisedTrainer(
         device=device,
-        max_epochs=800,
+        max_epochs=1200,
         train_data_loader=loader,
         network=net,
         optimizer=opt,
@@ -176,7 +176,7 @@ def train(args):
             logdir = logdir.joinpath(str(int(dirs[-1]) + 1))
 
     # Adaptive learning rate
-    lr_scheduler = StepLR(opt, 200)
+    lr_scheduler = StepLR(opt, 600)
     lr_handler = LrScheduleHandler(lr_scheduler)
     lr_handler.attach(trainer)
 
