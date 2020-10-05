@@ -174,6 +174,7 @@ def train(args):
 
     else:
         logdir = Path('./runs/')
+        logdir.mkdir(exist_ok=True)
         dirs = sorted([int(x.name) for x in logdir.iterdir() if x.is_dir()])
         if not dirs:
             logdir = logdir.joinpath('0')
