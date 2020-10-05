@@ -34,11 +34,11 @@ def parse_args():
 
     train_parse = subparsers.add_parser('train', help="Train the network")
     train_parse.add_argument('-load', type=str, help='load from a given checkpoint')
-    train_parse.add_argument('-data', type=str, help='data folder')
+    train_parse.add_argument('-data', type=str, help='data folder. should contain "train" and "val" sub-folders')
 
     val_parse = subparsers.add_parser('validate', help='Evaluate the network')
     val_parse.add_argument('load', type=str, help='load from a given checkpoint')
-    val_parse.add_argument('-data', type=str, help='data folder')
+    val_parse.add_argument('-data', type=str, help='data folder. should contain "train" and "val" sub-folders')
 
     seg_parse = subparsers.add_parser('segment', help='Segment images')
     seg_parse.add_argument('load', type=str, help='load from a given checkpoint')
@@ -47,7 +47,7 @@ def parse_args():
     return parser.parse_args()
 
 def load_train_data(path, device=torch.device('cpu')):
-    path = Path(path)
+    path = Path(path).joinpath('train')
 
     images = sorted(str(p.absolute()) for p in path.glob("*US.nii"))
     segs = sorted(str(p.absolute()) for p in path.glob("*label.nii"))
@@ -78,7 +78,7 @@ def load_train_data(path, device=torch.device('cpu')):
     return loader
 
 def load_val_data(path, persistent=True):
-    path = Path(path)
+    path = Path(path).joinpath('val')
 
     random.seed(0)
     images = sorted(str(p.absolute()) for p in path.glob("*US.nii"))
@@ -140,9 +140,11 @@ def train(args):
     device = torch.device('cuda:0')
 
     if not args.data:
-        loader = load_train_data("U:/Documents/DeepMV/data/train", device)
+        dataPath = "U:/Documents/DeepMV/data/"
     else:
-        loader = load_train_data(args.data, device)
+        dataPath = args.data
+
+    loader = load_train_data(dataPath, device)
 
     net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
                strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0.05).to(device)
@@ -209,7 +211,7 @@ def train(args):
     train_tensorboard_stats_handler.attach(trainer)
 
     # Set up validation step
-    val_loader = load_val_data("U:/Documents/DeepMV/data/val")
+    val_loader = load_val_data(dataPath)
 
     evaluator = SupervisedEvaluator(
         device=device,
@@ -257,7 +259,7 @@ def validate(args):
     config.print_config()
 
     if not args.data:
-        loader = load_val_data("U:/Documents/DeepMV/data/val")
+        loader = load_val_data("U:/Documents/DeepMV/data")
     else:
         loader = load_val_data(args.data, False)
 
