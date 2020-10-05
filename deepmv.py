@@ -34,6 +34,7 @@ def parse_args():
 
     train_parse = subparsers.add_parser('train', help="Train the network")
     train_parse.add_argument('-load', type=str, help='load from a given checkpoint')
+    train_parse.add_argument('-data', type=str, help='data folder')
 
     val_parse = subparsers.add_parser('validate', help='Evaluate the network')
     val_parse.add_argument('load', type=str, help='load from a given checkpoint')
@@ -137,7 +138,11 @@ def train(args):
     config.print_config()
 
     device = torch.device('cuda:0')
-    loader = load_train_data("U:/Documents/DeepMV/data/train", device)
+
+    if not args.data:
+        loader = load_train_data("U:/Documents/DeepMV/data/train", device)
+    else:
+        loader = load_train_data(args.data, device)
 
     net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
                strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0.05).to(device)
