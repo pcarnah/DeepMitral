@@ -19,12 +19,15 @@ from monai.handlers import (StatsHandler, TensorBoardStatsHandler, TensorBoardIm
 from monai.networks import predict_segmentation
 from monai.networks.nets import *
 from monai.networks.layers import Norm
+from monai.optimizers import Novograd
 from monai.losses import DiceLoss, GeneralizedDiceLoss
 from monai.inferers import SlidingWindowInferer
 from monai.engines import SupervisedTrainer, SupervisedEvaluator
 
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau
+
+from handlers import HausdorffDistance, AvgSurfaceDistance
 
 def parse_args():
     parser = argparse.ArgumentParser(description='DeepMV training')
@@ -73,7 +76,7 @@ def load_train_data(path, device=torch.device('cpu')):
     persistent_cache = Path("./persistent_cache")
     persistent_cache.mkdir(parents=True, exist_ok=True)
     ds = PersistentDataset(d, xform, persistent_cache)
-    loader = DataLoader(ds, batch_size=7, shuffle=True, num_workers=0, drop_last=True)
+    loader = DataLoader(ds, batch_size=8, shuffle=True, num_workers=0, drop_last=True)
 
     return loader
 
@@ -149,7 +152,8 @@ def train(args):
     net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
                strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0.05).to(device)
     loss = GeneralizedDiceLoss(sigmoid=True)
-    opt = torch.optim.Adam(net.parameters(), 1e-3)
+    # opt = torch.optim.Adam(net.parameters(), 1e-3)
+    opt = Novograd(net.parameters(), 1e-3)
 
     # trainer = create_supervised_trainer(net, opt, loss, device, False, )
     trainer = SupervisedTrainer(
@@ -160,6 +164,7 @@ def train(args):
         optimizer=opt,
         loss_function=loss,
         key_train_metric={"train_meandice": MeanDice(sigmoid=True,output_transform=lambda x: (x["pred"], x["label"]))},
+        amp=True
     )
 
     # Load checkpoint if defined
@@ -219,6 +224,9 @@ def train(args):
         network=net,
         inferer=SlidingWindowInferer((96, 96, 96), sw_batch_size=6),
         key_val_metric={"val_meandice": MeanDice(sigmoid=True, output_transform=lambda x: (x["pred"], x["label"]))},
+        additional_metrics={
+            'HausdorffDistance': HausdorffDistance(percentile=95, output_transform=lambda x: (predict_segmentation(x["pred"]), x["label"])),
+            'AvgSurfaceDistance': AvgSurfaceDistance(output_transform=lambda x: (predict_segmentation(x["pred"]), x["label"]))},
     )
 
     val_stats_handler = StatsHandler(
@@ -246,7 +254,7 @@ def train(args):
 
     val_handler = ValidationHandler(
         validator=evaluator,
-        interval=10
+        interval=5
     )
     val_handler.attach(trainer)
 
@@ -271,8 +279,13 @@ def validate(args):
         device=device,
         val_data_loader=loader,
         network=net,
-        inferer=SlidingWindowInferer((96,96,96), sw_batch_size=6),
-        key_val_metric={"val_meandice": MeanDice(sigmoid=True,output_transform=lambda x: (x["pred"], x["label"]))},
+        inferer=SlidingWindowInferer((96, 96, 96), sw_batch_size=6),
+        key_val_metric={"val_meandice": MeanDice(sigmoid=True, output_transform=lambda x: (x["pred"], x["label"]))},
+        additional_metrics={
+            'HausdorffDistance': HausdorffDistance(percentile=95, output_transform=lambda x: (
+                predict_segmentation(x["pred"]), x["label"])),
+            'AvgSurfaceDistance': AvgSurfaceDistance(
+                output_transform=lambda x: (predict_segmentation(x["pred"]), x["label"]))},
     )
 
     checkpoint_loader = CheckpointLoader(args.load, {'net': net})
@@ -290,6 +303,7 @@ def validate(args):
     prediction_saver = SegmentationSaver(
         output_dir=logdir,
         name="evaluator",
+        dtype=np.dtype('float64'),
         batch_transform=lambda batch: batch["image_meta_dict"],
         output_transform=lambda output: predict_segmentation(output['pred'])
     )
