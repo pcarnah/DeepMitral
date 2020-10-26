@@ -12,7 +12,7 @@ from monai import config
 from monai.data import Dataset, DataLoader, GridPatchDataset, CacheDataset, PersistentDataset
 from monai.transforms import (Compose, LoadNiftid, Orientationd, ScaleIntensityd,
                               AddChanneld, ToTensord, CropForegroundd, Spacingd, RandSpatialCropSamplesd,
-                              RandAffined, RandCropByPosNegLabeld, AsDiscreted, Rand3DElasticd)
+                              RandAffined, RandCropByPosNegLabeld, AsDiscreted, Rand3DElasticd, LabelToContour)
 from monai.handlers import (StatsHandler, TensorBoardStatsHandler, TensorBoardImageHandler,
                             MeanDice, CheckpointSaver, CheckpointLoader, SegmentationSaver,
                             ValidationHandler, LrScheduleHandler)
@@ -28,6 +28,8 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau
 
 from handlers import HausdorffDistance, AvgSurfaceDistance
+
+from timeit import default_timer as timer
 
 def parse_args():
     parser = argparse.ArgumentParser(description='DeepMV training')
@@ -76,7 +78,7 @@ def load_train_data(path, device=torch.device('cpu')):
     persistent_cache = Path("./persistent_cache")
     persistent_cache.mkdir(parents=True, exist_ok=True)
     ds = PersistentDataset(d, xform, persistent_cache)
-    loader = DataLoader(ds, batch_size=8, shuffle=True, num_workers=0, drop_last=True)
+    loader = DataLoader(ds, batch_size=8, shuffle=True, num_workers=0, drop_last=True, pin_memory=torch.cuda.is_available())
 
     return loader
 
@@ -150,15 +152,15 @@ def train(args):
     loader = load_train_data(dataPath, device)
 
     net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
-               strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0.05).to(device)
+               strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0.0).to(device)
     loss = GeneralizedDiceLoss(sigmoid=True)
     # opt = torch.optim.Adam(net.parameters(), 1e-3)
-    opt = Novograd(net.parameters(), 1e-3)
+    opt = Novograd(net.parameters(), 1e-2)
 
     # trainer = create_supervised_trainer(net, opt, loss, device, False, )
     trainer = SupervisedTrainer(
         device=device,
-        max_epochs=1200,
+        max_epochs=3000,
         train_data_loader=loader,
         network=net,
         optimizer=opt,
@@ -189,7 +191,7 @@ def train(args):
             logdir = logdir.joinpath(str(int(dirs[-1]) + 1))
 
     # Adaptive learning rate
-    lr_scheduler = StepLR(opt, 600)
+    lr_scheduler = StepLR(opt, 1000)
     lr_handler = LrScheduleHandler(lr_scheduler)
     lr_handler.attach(trainer)
 
@@ -254,7 +256,7 @@ def train(args):
 
     val_handler = ValidationHandler(
         validator=evaluator,
-        interval=5
+        interval=10
     )
     val_handler.attach(trainer)
 
@@ -272,6 +274,7 @@ def validate(args):
         loader = load_val_data(args.data, False)
 
     device = torch.device('cuda:0')
+
     net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
                strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH).to(device)
 
@@ -283,9 +286,9 @@ def validate(args):
         key_val_metric={"val_meandice": MeanDice(sigmoid=True, output_transform=lambda x: (x["pred"], x["label"]))},
         additional_metrics={
             'HausdorffDistance': HausdorffDistance(percentile=95, output_transform=lambda x: (
-                predict_segmentation(x["pred"]), x["label"])),
+                predict_segmentation(x["pred"]), x["label"]), device=device),
             'AvgSurfaceDistance': AvgSurfaceDistance(
-                output_transform=lambda x: (predict_segmentation(x["pred"]), x["label"]))},
+                output_transform=lambda x: (predict_segmentation(x["pred"]), x["label"]), device=device)},
     )
 
     checkpoint_loader = CheckpointLoader(args.load, {'net': net})
@@ -300,17 +303,22 @@ def validate(args):
         global_epoch_transform=lambda x: 0)
     val_stats_handler.attach(evaluator)
 
+    def tx(output):
+        return predict_segmentation(output['pred'])
+
     prediction_saver = SegmentationSaver(
         output_dir=logdir,
         name="evaluator",
         dtype=np.dtype('float64'),
         batch_transform=lambda batch: batch["image_meta_dict"],
-        output_transform=lambda output: predict_segmentation(output['pred'])
+        output_transform=tx
     )
     prediction_saver.attach(evaluator)
 
+    start = timer()
     evaluator.run()
-    print(evaluator.get_validation_stats())
+    end = timer()
+    print(evaluator.get_validation_stats(), "took {}s".format(end-start))
 
 def segment(args):
     config.print_config()
