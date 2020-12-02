@@ -471,6 +471,214 @@ Run 32 - Val mean dice 0.820 at epoch 470 (0.807 at 3000)
     )
 	lr_scheduler = StepLR(opt, 1000)
 	
+Run 33 - Val mean dice 0.805 at epoch 970 ( 0.777 at 3000)
+	xform = Compose([
+        LoadNiftid(keys),
+        AddChanneld(keys),
+        Spacingd(keys, 0.5, diagonal=True, mode=('bilinear', 'nearest')),
+        Orientationd(keys, axcodes='RAS'),
+        ScaleIntensityd("image"),
+        CropForegroundd(keys, source_key="image"),
+        #RandAffined(keys, mode=('bilinear', 'nearest'), rotate_range=(0.15,0.15,0.15), scale_range=(0.05,0.05,0.05), prob=0.2, as_tensor_output=False, device=device),
+        # Rand3DElasticd(keys, mode=('bilinear', 'nearest'),  rotate_range=(0.15,0.15,0.15), scale_range=(0.05,0.05,0.05),
+        #                sigma_range=(0,1), magnitude_range=(0,2), prob=0.2, as_tensor_output=False, device=device),
+        RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(96,96,96), pos=0.8, neg=0.2, num_samples=4),
+        ToTensord(keys)
+    ])
+
+    loader = DataLoader(ds, batch_size=8, shuffle=True, num_workers=0, drop_last=True, pin_memory=torch.cuda.is_available())
+	
+	net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
+               strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0.0).to(device)
+			   
+	gd = GeneralizedDiceLoss(sigmoid=True)
+    bce = torch.nn.BCEWithLogitsLoss()
+
+    def loss(input,target):
+        return gd(input,target) + (1 - 1 / torch.exp(bce(input,target)))
+			   
+    opt = Novograd(net.parameters(), 1e-3)
+	trainer = SupervisedTrainer(
+        device=device,
+        max_epochs=3000,
+        train_data_loader=loader,
+        network=net,
+        optimizer=opt,
+        loss_function=loss,
+        key_train_metric={"train_meandice": MeanDice(sigmoid=True,output_transform=lambda x: (x["pred"], x["label"]))},
+        amp=True
+    )
+	lr_scheduler = StepLR(opt, 1500)
+	
+	Notes: Metrics -- AvgSurfaceDistance: 1.5766 HausdorffDistance: 7.5878
+	
+Run 34 - Val mean dice 0.825 at epoch 790 ( 0.8045 at 2000)
+	xform = Compose([
+        LoadNiftid(keys),
+        AddChanneld(keys),
+        Spacingd(keys, 0.5, diagonal=True, mode=('bilinear', 'nearest')),
+        Orientationd(keys, axcodes='RAS'),
+        ScaleIntensityd("image"),
+        CropForegroundd(keys, source_key="image"),
+        #RandAffined(keys, mode=('bilinear', 'nearest'), rotate_range=(0.15,0.15,0.15), scale_range=(0.05,0.05,0.05), prob=0.2, as_tensor_output=False, device=device),
+        # Rand3DElasticd(keys, mode=('bilinear', 'nearest'),  rotate_range=(0.15,0.15,0.15), scale_range=(0.05,0.05,0.05),
+        #                sigma_range=(0,1), magnitude_range=(0,2), prob=0.2, as_tensor_output=False, device=device),
+        RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(96,96,96), pos=0.8, neg=0.2, num_samples=4),
+        ToTensord(keys)
+    ])
+
+    loader = DataLoader(ds, batch_size=8, shuffle=True, num_workers=0, drop_last=True, pin_memory=torch.cuda.is_available())
+	
+	net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
+               strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0.0).to(device)
+			   
+	gd = GeneralizedDiceLoss(sigmoid=True)
+    bce = torch.nn.BCEWithLogitsLoss()
+
+    def loss(input,target):
+        return gd(input,target) + bce(input,target)
+			   
+    opt = Novograd(net.parameters(), 1e-2)
+	trainer = SupervisedTrainer(
+        device=device,
+        max_epochs=2000,
+        train_data_loader=loader,
+        network=net,
+        optimizer=opt,
+        loss_function=loss,
+        key_train_metric={"train_meandice": MeanDice(sigmoid=True,output_transform=lambda x: (x["pred"], x["label"]))},
+        amp=True
+    )
+	lr_scheduler = StepLR(opt, 1000)
+	
+	Notes: Metrics -- AvgSurfaceDistance: 1.0002 HausdorffDistance: 7.0929
+	
+	
+Run 35 - Val mean dice _ at epoch _ ( _ at _)
+	xform = Compose([
+        LoadNiftid(keys),
+        AddChanneld(keys),
+        Spacingd(keys, 0.5, diagonal=True, mode=('bilinear', 'nearest')),
+        Orientationd(keys, axcodes='RAS'),
+        ScaleIntensityd("image"),
+        CropForegroundd(keys, source_key="image"),
+        #RandAffined(keys, mode=('bilinear', 'nearest'), rotate_range=(0.15,0.15,0.15), scale_range=(0.05,0.05,0.05), prob=0.2, as_tensor_output=False, device=device),
+        # Rand3DElasticd(keys, mode=('bilinear', 'nearest'),  rotate_range=(0.15,0.15,0.15), scale_range=(0.05,0.05,0.05),
+        #                sigma_range=(0,1), magnitude_range=(0,2), prob=0.2, as_tensor_output=False, device=device),
+        RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(96,96,96), pos=0.8, neg=0.2, num_samples=4),
+        ToTensord(keys)
+    ])
+
+    loader = DataLoader(ds, batch_size=1, shuffle=True, num_workers=0, drop_last=True, pin_memory=torch.cuda.is_available())
+	
+	net = VNet(spatial_dims=3, in_channels=1, out_channels=1).to(device)
+			   
+	gd = GeneralizedDiceLoss(sigmoid=True)
+    bce = torch.nn.BCEWithLogitsLoss()
+
+    def loss(input,target):
+        return gd(input,target) + bce(input,target)
+			   
+    opt = Novograd(net.parameters(), 1e-2)
+	trainer = SupervisedTrainer(
+        device=device,
+        max_epochs=2000,
+        train_data_loader=loader,
+        network=net,
+        optimizer=opt,
+        loss_function=loss,
+        key_train_metric={"train_meandice": MeanDice(sigmoid=True,output_transform=lambda x: (x["pred"], x["label"]))},
+        amp=True
+    )
+	lr_scheduler = StepLR(opt, 1000)
+	
+	Notes: Metrics -- AvgSurfaceDistance: 1.044 HausdorffDistance: 8.18, slow training (nearly 2 days)
+	
+
+Run 36
+	xform = Compose([
+        LoadNiftid(keys),
+        AddChanneld(keys),
+        Spacingd(keys, (0.5,0.5,0.25), diagonal=True, mode=('bilinear', 'nearest')),
+        Orientationd(keys, axcodes='RAS'),
+        ScaleIntensityd("image"),
+        CropForegroundd(keys, source_key="image"),
+        #RandAffined(keys, mode=('bilinear', 'nearest'), rotate_range=(0.15,0.15,0.15), scale_range=(0.05,0.05,0.05), prob=0.2, as_tensor_output=False, device=device),
+        # Rand3DElasticd(keys, mode=('bilinear', 'nearest'),  rotate_range=(0.15,0.15,0.15), scale_range=(0.05,0.05,0.05),
+        #                sigma_range=(0,1), magnitude_range=(0,2), prob=0.2, as_tensor_output=False, device=device),
+        RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(128,128,96), pos=0.8, neg=0.2, num_samples=2),
+        ToTensord(keys)
+    ])
+	
+	loader = DataLoader(ds, batch_size=1, shuffle=True, num_workers=0, drop_last=True, pin_memory=torch.cuda.is_available())
+	
+	net = AHNet().to(device)
+	
+	gd = GeneralizedDiceLoss(sigmoid=True)
+    bce = torch.nn.BCEWithLogitsLoss()
+
+    def loss(input,target):
+        return gd(input,target) + bce(input,target)
+			   
+    opt = Novograd(net.parameters(), 1e-2)
+	
+	trainer = SupervisedTrainer(
+        device=device,
+        max_epochs=2000,
+        train_data_loader=loader,
+        network=net,
+        optimizer=opt,
+        loss_function=loss,
+        key_train_metric={"train_meandice": MeanDice(sigmoid=True,output_transform=lambda x: (x["pred"], x["label"]))},
+        amp=True
+    )
+	
+	lr_scheduler = StepLR(opt, 1000)
+	
+	Note: Diverges at 800 epochs, poor performance, slow training (23hrs)
+	
+Run 37
+	xform = Compose([
+        LoadNiftid(keys),
+        AddChanneld(keys),
+        Spacingd(keys, (0.5,0.5,0.3), diagonal=True, mode=('bilinear', 'nearest')),
+        Orientationd(keys, axcodes='RAS'),
+        ScaleIntensityd("image"),
+        CropForegroundd(keys, source_key="image"),
+        #RandAffined(keys, mode=('bilinear', 'nearest'), rotate_range=(0.15,0.15,0.15), scale_range=(0.05,0.05,0.05), prob=0.2, as_tensor_output=False, device=device),
+        # Rand3DElasticd(keys, mode=('bilinear', 'nearest'),  rotate_range=(0.15,0.15,0.15), scale_range=(0.05,0.05,0.05),
+        #                sigma_range=(0,1), magnitude_range=(0,2), prob=0.2, as_tensor_output=False, device=device),
+        RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(64,64,64), pos=0.8, neg=0.2, num_samples=4),
+        ToTensord(keys)
+    ])
+	
+	loader = DataLoader(ds, batch_size=4, shuffle=True, num_workers=0, drop_last=True, pin_memory=torch.cuda.is_available())
+	
+	net = SegResNetVAE(input_image_size=(64,64,64), out_channels=1, norm_name='batch').to(device)
+	
+	gd = GeneralizedDiceLoss(sigmoid=True)
+    bce = torch.nn.BCEWithLogitsLoss()
+
+    def loss(input,target):
+        return gd(input[0],target) + bce(input[0],target)
+
+    opt = Novograd(net.parameters(), 1e-2)
+	
+	trainer = SupervisedTrainer(
+        device=device,
+        max_epochs=2000,
+        train_data_loader=loader,
+        network=net,
+        optimizer=opt,
+        loss_function=loss,
+        key_train_metric={"train_meandice": MeanDice(sigmoid=True,output_transform=lambda x: (x["pred"][0], x["label"]))},
+        amp=True
+    )
+	
+	lr_scheduler = StepLR(opt, 1000)
+	
+	Notes: Bathtub curve with validation metrics getting worse after 1300 epochs
+	
 
 
 Things to test: LR Scheduling (step, plateau)

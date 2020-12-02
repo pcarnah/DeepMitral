@@ -28,6 +28,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau
 
 from handlers import HausdorffDistance, AvgSurfaceDistance
+from losses.SDWeightedDice import SDWeightedDiceLoss
 
 from timeit import default_timer as timer
 
@@ -153,14 +154,23 @@ def train(args):
 
     net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
                strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0.0).to(device)
-    loss = GeneralizedDiceLoss(sigmoid=True)
+
+    # loss = GeneralizedDiceLoss(sigmoid=True)
+    # loss = SDWeightedDiceLoss(sigmoid=True)
     # opt = torch.optim.Adam(net.parameters(), 1e-3)
+
+    gd = GeneralizedDiceLoss(sigmoid=True)
+    bce = torch.nn.BCEWithLogitsLoss()
+
+    def loss(input,target):
+        return gd(input,target) + bce(input,target)
+
     opt = Novograd(net.parameters(), 1e-2)
 
     # trainer = create_supervised_trainer(net, opt, loss, device, False, )
     trainer = SupervisedTrainer(
         device=device,
-        max_epochs=3000,
+        max_epochs=2000,
         train_data_loader=loader,
         network=net,
         optimizer=opt,

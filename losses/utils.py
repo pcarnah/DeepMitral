@@ -6,6 +6,17 @@ import torch.nn.functional as F
 
 from timeit import default_timer as timer
 
+def compute_percentile(
+        input: torch.Tensor,
+        percentile: float
+) -> torch.Tensor:
+    """
+    Computes the percentile over a batch
+    :param input: input tensor B x l
+    :param percentile: The percentile to compute
+    """
+
+    return input.kthvalue(1 + round(.01 * float(percentile) * (input.size(-1) - 1)), dim=-1).values
 
 def label_to_contour(img: torch.Tensor) -> torch.Tensor:
     """
@@ -28,13 +39,36 @@ def label_to_contour(img: torch.Tensor) -> torch.Tensor:
     contour_img.clamp_(min=0.0, max=1.0)
     return contour_img
 
+def compute_mean_distances(
+        seg_pred: Union[np.ndarray, torch.Tensor],
+        seg_gt: Union[np.ndarray, torch.Tensor]
+) -> torch.Tensor:
+    """
+    Compute the mean surface distances.
+
+    Args:
+        seg_pred: the predicted binary or labelfield image.
+        seg_gt: the actual binary or labelfield image.
+    """
+    device = seg_pred.device
+
+    # start = timer()
+    edges_pred = label_to_contour(seg_pred)
+    edges_gt = label_to_contour(seg_gt)
+    # end = timer()
+    # print("Extract edges: {}".format(end-start))
+
+    surface_distance = get_surface_distances(edges_pred, edges_gt, 2000, 5000)
+
+    return surface_distance.mean(dim=-1)
+
 
 def compute_hausdorff_distances(
         seg_pred: Union[np.ndarray, torch.Tensor],
         seg_gt: Union[np.ndarray, torch.Tensor],
         percentile: Optional[float] = None,
         directed: bool = False,
-):
+) -> torch.Tensor:
     """
     Compute the Hausdorff distance. The user has the option to calculate the
     directed or non-directed Hausdorff distance. By default, the non-directed
@@ -56,24 +90,21 @@ def compute_hausdorff_distances(
 
     device = seg_pred.device
 
-    start = timer()
+    # start = timer()
     edges_pred = label_to_contour(seg_pred)
     edges_gt = label_to_contour(seg_gt)
-    end = timer()
-    print("Extract edges: {}".format(end-start))
+    # end = timer()
+    # print("Extract edges: {}".format(end-start))
 
-    hds = torch.zeros(seg_pred.shape[0])
-    for i, edges in enumerate(zip(edges_pred, edges_gt)):
-        hds[i] = compute_percent_hausdorff_distance(edges[0], edges[1], percentile)
+    hd = compute_percent_hausdorff_distance(edges_pred, edges_gt, percentile)
     if directed:
-        return hds
+        return hd
 
-    for i, edges in enumerate(zip(edges_pred, edges_gt)):
-        hds[i] = max(hds[i], compute_percent_hausdorff_distance(edges[1], edges[0], percentile))
+    hd = torch.max(hd, compute_percent_hausdorff_distance(edges_pred, edges_gt, percentile))
 
-    end = timer()
-    print("Total time: {}".format(end - start))
-    return hds
+    # end = timer()
+    # print("Total time: {}".format(end - start))
+    return hd
 
 
 def compute_percent_hausdorff_distance(
@@ -95,20 +126,19 @@ def compute_percent_hausdorff_distance(
             percentile of the Hausdorff Distance rather than the maximum result will be achieved.
             Defaults to ``None``.
     """
-    start = timer()
-    surface_distance = get_surface_distances(edges_pred, edges_gt)
-    end = timer()
-    print("Surf dists: {}".format(end - start))
+    # start = timer()
+    surface_distance = get_surface_distances(edges_pred, edges_gt, 2000, 5000)
+    # end = timer()
+    # print("Surf dists: {}".format(end - start))
 
     # for input without foreground
     # if surface_distance.shape == (0,):
     #     return np.inf
 
     if not percentile:
-        return surface_distance.max()
+        return surface_distance.max(dim=-1)[0]
     elif 0 <= percentile <= 100:
-        return surface_distance.view(-1).kthvalue(
-            1 + round(.01 * float(percentile) * (surface_distance.numel() - 1))).values.item()
+        return compute_percentile(surface_distance, percentile)
     else:
         raise ValueError(f"percentile should be a value between 0 and 100, get {percentile}.")
 
@@ -116,6 +146,9 @@ def compute_percent_hausdorff_distance(
 def get_surface_distances(
         edges_pred: torch.Tensor,
         edges_gt: torch.Tensor,
+        num_samples_pred: Optional[int] = 5000,
+        num_samples_gt: Optional[int] = 5000,
+        dtype: Optional[torch.dtype] = torch.float32
 ) -> torch.Tensor:
     """
     This function is used to compute the surface distances from `seg_pred` to `seg_gt`.
@@ -123,18 +156,9 @@ def get_surface_distances(
     Args:
         edges_pred: the edge of the predictions.
         edges_gt: the edge of the ground truth.
-        label_idx: for labelfield images, convert to binary with
-            `seg_pred = seg_pred == label_idx`.
-        crop: crop input images and only keep the foregrounds. In order to
-            maintain two inputs' shapes, here the bounding box is achieved
-            by ``(seg_pred | seg_gt)`` which represents the union set of two
-            images. Defaults to ``True``.
-        distance_metric: : [``"euclidean"``, ``"chessboard"``, ``"taxicab"``]
-            the metric used to compute surface distance. Defaults to ``"euclidean"``.
-
-            - ``"euclidean"``, uses Exact Euclidean distance transform.
-            - ``"chessboard"``, uses `chessboard` metric in chamfer type of transform.
-            - ``"taxicab"``, uses `taxicab` metric in chamfer type of transform.
+        num_samples_pred: Number of samples to use from prediction.
+        num_samples_gt: Number of samples to use from ground-truth.
+        dtype: The dtype to use for computation
     """
 
     # if not torch.any(edges_pred):
@@ -144,14 +168,34 @@ def get_surface_distances(
     #     return torch.tensor([float('Inf')], device=edges_gt.device)
 
     # TODO convert IJK to RAS using meta inf if available
-    print(torch.nonzero(edges_pred).float().shape)
 
-    ep = torch.nonzero(edges_pred).float()
-    eg = torch.nonzero(edges_gt).float()
+    ep = torch.zeros((edges_pred.shape[0], num_samples_pred, 3),
+                     device=edges_pred.device, dtype=dtype, requires_grad=True)
+    eg = torch.zeros((edges_pred.shape[0], num_samples_gt, 3),
+                     device=edges_pred.device, dtype=dtype, requires_grad=True)
+
+    for b in range(ep.shape[0]):
+        nzp = torch.nonzero(edges_pred[b, 0, :], as_tuple=False).float()
+        nzg = torch.nonzero(edges_gt[b, 0, :], as_tuple=False).float()
+
+        pred_samp = min(nzp.shape[0], num_samples_pred)
+        gt_samp = min(nzg.shape[0], num_samples_gt)
+
+        pidx = torch.randperm(nzp.shape[0])[:pred_samp]
+        gidx = torch.randperm(nzg.shape[0])[:gt_samp]
+
+        ep[b, :pred_samp] = nzp[pidx]
+        eg[b, :gt_samp] = nzg[gidx]
+        # Pad rest of row with first value if too few samples
+        ep[b, pred_samp:] = ep[b, 0]
+        eg[b, gt_samp:] = eg[b, 0]
+
     # Compute distances between each pair of edge indices
     dis = torch.cdist(ep, eg)
 
     # Take smallest distance for each row to get distance to closest point
-    surface_distance, _ = dis.min(dim=1)
-
+    surface_distance, _ = dis.min(dim=-1)
     return surface_distance
+
+
+

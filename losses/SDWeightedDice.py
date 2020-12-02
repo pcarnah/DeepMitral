@@ -134,12 +134,12 @@ class SDWeightedDiceLoss(_Loss):
             b[infs] = torch.max(b)
 
         f: torch.Tensor = 1.0 - (2.0 * (intersection * w).sum(1) + smooth) / ((denominator * w).sum(1) + smooth)
-        d: torch.Tensor = compute_hausdorff_distances(input,target, 95, True)
+        d: torch.Tensor = 1.0 - 1.0 / torch.exp(0.1 * compute_hausdorff_distances(input,target, 95, True))
 
         if self.reduction == LossReduction.MEAN.value:
-            f = torch.mean(f+d)  # the batch and channel average
+            f = torch.mean(f) + torch.mean(d)  # the batch and channel average
         elif self.reduction == LossReduction.SUM.value:
-            f = torch.sum(f+d)  # sum over the batch and channel dims
+            f = torch.sum(f) + torch.sum(d)  # sum over the batch and channel dims
         elif self.reduction == LossReduction.NONE.value:
             pass  # returns [N, n_classes] losses
         else:
