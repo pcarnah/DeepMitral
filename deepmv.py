@@ -41,10 +41,13 @@ def parse_args():
     train_parse = subparsers.add_parser('train', help="Train the network")
     train_parse.add_argument('-load', type=str, help='load from a given checkpoint')
     train_parse.add_argument('-data', type=str, help='data folder. should contain "train" and "val" sub-folders')
+    train_parse.add_argument('-use_val', action='store_true', help='Flag to indicate that training set should include validation data.')
 
     val_parse = subparsers.add_parser('validate', help='Evaluate the network')
     val_parse.add_argument('load', type=str, help='load from a given checkpoint')
     val_parse.add_argument('-data', type=str, help='data folder. should contain "train" and "val" sub-folders')
+    val_parse.add_argument('-use_test', action='store_true',
+                             help='Run on test data')
 
     seg_parse = subparsers.add_parser('segment', help='Segment images')
     seg_parse.add_argument('load', type=str, help='load from a given checkpoint')
@@ -52,11 +55,20 @@ def parse_args():
 
     return parser.parse_args()
 
-def load_train_data(path, device=torch.device('cpu')):
-    path = Path(path).joinpath('train')
+def load_train_data(path, use_val=False, device=torch.device('cpu')):
+    train_path = Path(path).joinpath('train')
 
-    images = sorted(str(p.absolute()) for p in path.glob("*US.nii"))
-    segs = sorted(str(p.absolute()) for p in path.glob("*label.nii"))
+    images = [str(p.absolute()) for p in train_path.glob("*US.nii")]
+    segs = [str(p.absolute()) for p in train_path.glob("*label.nii")]
+
+    if use_val:
+        val_path = Path(path).joinpath('val')
+        images += [str(p.absolute()) for p in val_path.glob("*US.nii")]
+        segs += [str(p.absolute()) for p in val_path.glob("*label.nii")]
+
+    images.sort()
+    segs.sort()
+
     d = [{"image": im, "label": seg} for im, seg in zip(images, segs)]
     keys = ("image", "label")
 
@@ -64,7 +76,7 @@ def load_train_data(path, device=torch.device('cpu')):
     xform = Compose([
         LoadNiftid(keys),
         AddChanneld(keys),
-        Spacingd(keys, 0.5, diagonal=True, mode=('bilinear', 'nearest')),
+        Spacingd(keys, 0.3, diagonal=True, mode=('bilinear', 'nearest')),
         Orientationd(keys, axcodes='RAS'),
         ScaleIntensityd("image"),
         CropForegroundd(keys, source_key="image"),
@@ -83,8 +95,12 @@ def load_train_data(path, device=torch.device('cpu')):
 
     return loader
 
-def load_val_data(path, persistent=True):
-    path = Path(path).joinpath('val')
+
+def load_val_data(path, persistent=True, test=False):
+    if not test:
+        path = Path(path).joinpath('val')
+    else:
+        path = Path(path).joinpath('test')
 
     random.seed(0)
     images = sorted(str(p.absolute()) for p in path.glob("*US.nii"))
@@ -96,7 +112,7 @@ def load_val_data(path, persistent=True):
     xform = Compose([
         LoadNiftid(keys),
         AddChanneld(keys),
-        Spacingd(keys, 0.5, diagonal=True, mode=('bilinear', 'nearest')),
+        Spacingd(keys, 0.3, diagonal=True, mode=('bilinear', 'nearest')),
         Orientationd(keys, axcodes='RAS'),
         ScaleIntensityd("image"),
         CropForegroundd(keys, source_key="image"),
@@ -104,7 +120,7 @@ def load_val_data(path, persistent=True):
     ])
 
     # ds = CacheDataset(d, xform)
-    if persistent:
+    if persistent and not test:
         persistent_cache = Path("./persistent_cache")
         persistent_cache.mkdir(parents=True, exist_ok=True)
         ds = PersistentDataset(d, xform, persistent_cache)
@@ -126,7 +142,7 @@ def load_seg_data(path):
     xform = Compose([
         LoadNiftid(keys),
         AddChanneld(keys),
-        Spacingd(keys, 0.5, diagonal=True, mode='bilinear'),
+        Spacingd(keys, 0.3, diagonal=True, mode='bilinear'),
         Orientationd(keys, axcodes='RAS'),
         ScaleIntensityd("image"),
         CropForegroundd(keys, source_key="image"),
@@ -150,7 +166,7 @@ def train(args):
     else:
         dataPath = args.data
 
-    loader = load_train_data(dataPath, device)
+    loader = load_train_data(dataPath, use_val=args.use_val, device=device)
 
     net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
                strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0.0).to(device)
@@ -217,6 +233,8 @@ def train(args):
         output_transform=lambda x: x['loss'])
     train_stats_handler.attach(trainer)
 
+    test = monai.utils.first(loader)['image']
+
     tb_writer = SummaryWriter(log_dir=logdir)
     tb_writer.add_graph(net, monai.utils.first(loader)['image'].to(device))
 
@@ -279,9 +297,9 @@ def validate(args):
     config.print_config()
 
     if not args.data:
-        loader = load_val_data("U:/Documents/DeepMV/data")
+        loader = load_val_data("U:/Documents/DeepMV/data", test=args.use_test)
     else:
-        loader = load_val_data(args.data, False)
+        loader = load_val_data(args.data, False, test=args.use_test)
 
     device = torch.device('cuda:0')
 
@@ -354,6 +372,7 @@ def segment(args):
     prediction_saver = SegmentationSaver(
         output_dir=logdir,
         name="evaluator",
+        dtype=np.dtype('float64'),
         batch_transform=lambda batch: batch["image_meta_dict"],
         output_transform=lambda output: predict_segmentation(output['pred'])
     )
@@ -362,6 +381,8 @@ def segment(args):
     evaluator.run()
 
 if __name__ == "__main__":
+    logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+    start = timer()
     args = parse_args()
     if args.mode == 'validate':
         validate(args)
@@ -369,3 +390,5 @@ if __name__ == "__main__":
         train(args)
     elif args.mode == 'segment':
         segment(args)
+    end = timer()
+    print({"Total runtime: {}".format(end-start)})
