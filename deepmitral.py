@@ -28,7 +28,6 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau
 
 from handlers import HausdorffDistance, AvgSurfaceDistance
-from losses.SDWeightedDice import SDWeightedDiceLoss
 
 from timeit import default_timer as timer
 
