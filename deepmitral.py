@@ -10,12 +10,12 @@ import random
 import monai
 from monai import config
 from monai.data import Dataset, DataLoader, GridPatchDataset, CacheDataset, PersistentDataset
-from monai.transforms import (Compose, LoadNiftid, Orientationd, ScaleIntensityd,
-                              AddChanneld, ToTensord, CropForegroundd, Spacingd, RandSpatialCropSamplesd,
-                              RandAffined, RandCropByPosNegLabeld, AsDiscreted, Rand3DElasticd, LabelToContour)
+from monai.transforms import (Compose, LoadImaged, Orientationd, ScaleIntensityd,
+                              EnsureChannelFirstd, ToTensord, CropForegroundd, Spacingd, RandSpatialCropSamplesd,
+                              Invertd, RandCropByPosNegLabeld, AsDiscreted, EnsureTyped, Activationsd, SpatialPadd)
 from monai.handlers import (StatsHandler, TensorBoardStatsHandler, TensorBoardImageHandler,
                             MeanDice, CheckpointSaver, CheckpointLoader, SegmentationSaver,
-                            ValidationHandler, LrScheduleHandler)
+                            ValidationHandler, LrScheduleHandler, HausdorffDistance, SurfaceDistance)
 from monai.networks import predict_segmentation
 from monai.networks.nets import *
 from monai.networks.layers import Norm
@@ -27,7 +27,6 @@ from monai.engines import SupervisedTrainer, SupervisedEvaluator
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau
 
-from handlers import HausdorffDistance, AvgSurfaceDistance
 
 from timeit import default_timer as timer
 
@@ -73,17 +72,15 @@ def load_train_data(path, use_val=False, device=torch.device('cpu')):
 
     # Define transforms for image and segmentation
     xform = Compose([
-        LoadNiftid(keys),
-        AddChanneld(keys),
+        LoadImaged(keys),
+        EnsureChannelFirstd(keys),
         Spacingd(keys, 0.3, diagonal=True, mode=('bilinear', 'nearest')),
         Orientationd(keys, axcodes='RAS'),
         ScaleIntensityd("image"),
         CropForegroundd(keys, source_key="image"),
-        #RandAffined(keys, mode=('bilinear', 'nearest'), rotate_range=(0.15,0.15,0.15), scale_range=(0.05,0.05,0.05), prob=0.2, as_tensor_output=False, device=device),
-        # Rand3DElasticd(keys, mode=('bilinear', 'nearest'),  rotate_range=(0.15,0.15,0.15), scale_range=(0.05,0.05,0.05),
-        #                sigma_range=(0,1), magnitude_range=(0,2), prob=0.2, as_tensor_output=False, device=device),
+        SpatialPadd(keys, spatial_size=(96,96,96)),
         RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(96,96,96), pos=0.8, neg=0.2, num_samples=4),
-        ToTensord(keys)
+        EnsureTyped(keys)
     ])
 
     # ds = CacheDataset(d, xform)
@@ -109,13 +106,13 @@ def load_val_data(path, persistent=True, test=False):
 
     # Define transforms for image and segmentation
     xform = Compose([
-        LoadNiftid(keys),
-        AddChanneld(keys),
+        LoadImaged(keys),
+        EnsureChannelFirstd(keys),
         Spacingd(keys, 0.3, diagonal=True, mode=('bilinear', 'nearest')),
         Orientationd(keys, axcodes='RAS'),
         ScaleIntensityd("image"),
         CropForegroundd(keys, source_key="image"),
-        ToTensord(keys)
+        EnsureTyped(keys)
     ])
 
     # ds = CacheDataset(d, xform)
@@ -139,8 +136,8 @@ def load_seg_data(path):
 
     # Define transforms for image and segmentation
     xform = Compose([
-        LoadNiftid(keys),
-        AddChanneld(keys),
+        LoadImaged(keys),
+        EnsureChannelFirstd(keys),
         Spacingd(keys, 0.3, diagonal=True, mode='bilinear'),
         Orientationd(keys, axcodes='RAS'),
         ScaleIntensityd("image"),
@@ -153,6 +150,24 @@ def load_seg_data(path):
     loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=0, pin_memory=torch.cuda.is_available())
 
     return loader
+
+def create_model(device=torch.device('cpu')):
+    model = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
+               strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0.0)
+
+    return model.to(device)
+
+
+def output_tform(x):
+    post_pred = Compose(
+        [Activationsd(keys='pred', sigmoid=True),
+         AsDiscreted(keys='pred', threshold_values=True),
+         # Invertd(keys=('label', 'pred'), )
+        ]
+    )
+
+    xt = post_pred(x)
+    return xt['pred'], xt['label']
 
 
 def train(args):
@@ -167,8 +182,7 @@ def train(args):
 
     loader = load_train_data(dataPath, use_val=args.use_val, device=device)
 
-    net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
-               strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0.0).to(device)
+    net = create_model(device)
 
     # loss = GeneralizedDiceLoss(sigmoid=True)
     # loss = SDWeightedDiceLoss(sigmoid=True)
@@ -190,7 +204,8 @@ def train(args):
         network=net,
         optimizer=opt,
         loss_function=loss,
-        key_train_metric={"train_meandice": MeanDice(sigmoid=True,output_transform=lambda x: (x["pred"], x["label"]))},
+        decollate=False,
+        key_train_metric={"train_meandice": MeanDice(output_transform=output_tform)},
         amp=True
     )
 
@@ -235,7 +250,7 @@ def train(args):
     test = monai.utils.first(loader)['image']
 
     tb_writer = SummaryWriter(log_dir=logdir)
-    tb_writer.add_graph(net, monai.utils.first(loader)['image'].to(device))
+    # tb_writer.add_graph(net, monai.utils.first(loader)['image'].to(device))
 
     # TensorBoardStatsHandler plots loss at every iteration and plots metrics at every epoch, same as StatsHandler
     train_tensorboard_stats_handler = TensorBoardStatsHandler(
@@ -252,10 +267,11 @@ def train(args):
         val_data_loader=val_loader,
         network=net,
         inferer=SlidingWindowInferer((96, 96, 96), sw_batch_size=6),
-        key_val_metric={"val_meandice": MeanDice(sigmoid=True, output_transform=lambda x: (x["pred"], x["label"]))},
+        decollate=False,
+        key_val_metric={"val_meandice": MeanDice(output_transform=output_tform)},
         additional_metrics={
-            'HausdorffDistance': HausdorffDistance(percentile=95, output_transform=lambda x: (predict_segmentation(x["pred"]), x["label"])),
-            'AvgSurfaceDistance': AvgSurfaceDistance(output_transform=lambda x: (predict_segmentation(x["pred"]), x["label"]))},
+            'HausdorffDistance': HausdorffDistance(percentile=95, include_background=True, output_transform=output_tform),
+            'AvgSurfaceDistance': SurfaceDistance(include_background=True, output_transform=output_tform)},
     )
 
     val_stats_handler = StatsHandler(
@@ -302,20 +318,18 @@ def validate(args):
 
     device = torch.device('cuda:0')
 
-    net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
-               strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH).to(device)
+    net = create_model(device)
 
     evaluator = SupervisedEvaluator(
         device=device,
         val_data_loader=loader,
         network=net,
+        decollate=False,
         inferer=SlidingWindowInferer((96, 96, 96), sw_batch_size=6),
-        key_val_metric={"val_meandice": MeanDice(sigmoid=True, output_transform=lambda x: (x["pred"], x["label"]))},
+        key_val_metric={"val_meandice": MeanDice(output_transform=output_tform)},
         additional_metrics={
-            'HausdorffDistance': HausdorffDistance(percentile=95, output_transform=lambda x: (
-                predict_segmentation(x["pred"]), x["label"]), device=device),
-            'AvgSurfaceDistance': AvgSurfaceDistance(
-                output_transform=lambda x: (predict_segmentation(x["pred"]), x["label"]), device=device)},
+            'HausdorffDistance': HausdorffDistance(percentile=95, include_background=True, output_transform=output_tform),
+            'AvgSurfaceDistance': SurfaceDistance(include_background=True, output_transform=output_tform)},
     )
 
     checkpoint_loader = CheckpointLoader(args.load, {'net': net})
@@ -353,13 +367,13 @@ def segment(args):
     loader = load_seg_data(args.data)
 
     device = torch.device('cuda:0')
-    net = UNet(dimensions=3, in_channels=1, out_channels=1, channels=(16, 32, 64, 128, 256),
-               strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH).to(device)
+    net = create_model(device)
 
     evaluator = SupervisedEvaluator(
         device=device,
         val_data_loader=loader,
         network=net,
+        decollate=False,
         inferer=SlidingWindowInferer((96,96,96), sw_batch_size=6),
     )
 
