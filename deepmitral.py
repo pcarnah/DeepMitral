@@ -67,11 +67,11 @@ class DeepMitral:
 
     device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
 
-    # model = UNet(dimensions=3, in_channels=1, out_channels=2, channels=(16, 32, 64, 128, 256),
-    #              strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0.0).to(device)
+    model = UNet(dimensions=3, in_channels=1, out_channels=2, channels=(16, 32, 64, 128, 256),
+                 strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0.0).to(device)
 
-    model = UNETR(in_channels=1, out_channels=2, img_size=(96,96,96), feature_size=16, hidden_size=768, mlp_dim=3072,
-                  num_heads=12, pos_embed='perceptron', norm_name='instance', dropout_rate=0.2).to(device)
+    # model = UNETR(in_channels=1, out_channels=2, img_size=(96,96,96), feature_size=16, hidden_size=768, mlp_dim=3072,
+    #               num_heads=12, pos_embed='perceptron', norm_name='instance', dropout_rate=0.2).to(device)
 
     @classmethod
     def load_train_data(cls, path, use_val=False):
@@ -134,6 +134,20 @@ class DeepMitral:
         loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=0, pin_memory=torch.cuda.is_available())
 
         return loader
+
+    @classmethod
+    def load_model(cls, path):
+        net_params = torch.load(path, map_location=cls.device)
+
+        if isinstance(net_params, dict):
+            cls.model.load_state_dict(net_params['net'])
+        elif isinstance(net_params, torch.nn.Module):
+            cls.model = net_params
+        else:
+            logging.error('Could not load network')
+            return
+
+        return cls.model
 
     @classmethod
     def output_tform(cls, x):
@@ -208,8 +222,8 @@ class DeepMitral:
 
         ### optional section for checkpoint and tensorboard logging
         # adding checkpoint handler to save models (network params and optimizer stats) during training
-        checkpoint_handler = CheckpointSaver(logdir, {'net': net, 'opt': opt, 'trainer': trainer}, n_saved=20, save_final=True,
-                                             epoch_level=True, save_interval=50)
+        checkpoint_handler = CheckpointSaver(logdir, {'net': net, 'opt': opt, 'trainer': trainer}, n_saved=10, save_final=True,
+                                             epoch_level=True, save_interval=200)
         checkpoint_handler.attach(trainer)
 
         # StatsHandler prints loss at every iteration and print metrics at every epoch
@@ -260,13 +274,13 @@ class DeepMitral:
 
         # add handler to draw the first image and the corresponding label and model output in the last batch
         # here we draw the 3D output as GIF format along Depth axis, at every validation epoch
-        val_tensorboard_image_handler = TensorBoardImageHandler(
-            summary_writer=tb_writer,
-            batch_transform=lambda batch: (list_data_collate(batch)["image"], list_data_collate(batch)["label"]),
-            output_transform=lambda output: predict_segmentation(list_data_collate(output)['pred'], mutually_exclusive=True),
-            global_iter_transform=lambda x: trainer.state.epoch
-        )
-        val_tensorboard_image_handler.attach(evaluator)
+        # val_tensorboard_image_handler = TensorBoardImageHandler(
+        #     summary_writer=tb_writer,
+        #     batch_transform=lambda batch: (list_data_collate(batch)["image"], list_data_collate(batch)["label"]),
+        #     output_transform=lambda output: predict_segmentation(list_data_collate(output)['pred'], mutually_exclusive=True),
+        #     global_iter_transform=lambda x: trainer.state.epoch
+        # )
+        # val_tensorboard_image_handler.attach(evaluator)
 
         val_handler = ValidationHandler(
             validator=evaluator,
@@ -278,6 +292,8 @@ class DeepMitral:
 
         trainer.run()
 
+        torch.save(net, logdir.joinpath('final_model.md'))
+
     @classmethod
     def validate(cls, load_checkpoint, data=None, use_test=False):
         config.print_config()
@@ -287,7 +303,7 @@ class DeepMitral:
         else:
             loader = cls.load_val_data(data, False, test=use_test)
 
-        net = cls.model
+        net = cls.load_model(load_checkpoint)
 
         evaluator = SupervisedEvaluator(
             device=cls.device,
@@ -300,8 +316,8 @@ class DeepMitral:
                 'AvgSurfaceDistance': SurfaceDistance(include_background=True, output_transform=cls.output_tform)},
         )
 
-        checkpoint_loader = CheckpointLoader(load_checkpoint, {'net': net})
-        checkpoint_loader.attach(evaluator)
+        # checkpoint_loader = CheckpointLoader(load_checkpoint, {'net': net})
+        # checkpoint_loader.attach(evaluator)
 
         logdir = Path(load_checkpoint).parent.joinpath('out')
 
@@ -336,7 +352,7 @@ class DeepMitral:
         loader = cls.load_seg_data(data)
 
         device = torch.device('cuda:0')
-        net = cls.model
+        net = cls.load_model(load_checkpoint)
 
         evaluator = SupervisedEvaluator(
             device=device,
@@ -345,9 +361,6 @@ class DeepMitral:
             decollate=False,
             inferer=SlidingWindowInferer((96,96,96), sw_batch_size=6),
         )
-
-        checkpoint_loader = CheckpointLoader(load_checkpoint, {'net': net})
-        checkpoint_loader.attach(evaluator)
 
         logdir = Path(load_checkpoint).parent.joinpath('out')
 
