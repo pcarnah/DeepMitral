@@ -9,11 +9,12 @@ import random
 
 import monai
 from monai import config
-from monai.data import Dataset, DataLoader, GridPatchDataset, CacheDataset, PersistentDataset
+from monai.data import Dataset, DataLoader, GridPatchDataset, CacheDataset, PersistentDataset, LMDBDataset
 from monai.data.utils import list_data_collate
 from monai.transforms import (Compose, LoadImaged, Orientationd, ScaleIntensityd,
                               EnsureChannelFirstd, ToTensord, CropForegroundd, Spacingd, RandSpatialCropSamplesd,
-                              Invertd, RandCropByPosNegLabeld, AsDiscreted, EnsureTyped, Activationsd, SpatialPadd)
+                              Invertd, RandCropByPosNegLabeld, AsDiscreted, EnsureTyped, Activationsd, SpatialPadd, DataStatsd,
+                              KeepLargestConnectedComponentd)
 from monai.handlers import (StatsHandler, TensorBoardStatsHandler, TensorBoardImageHandler,
                             MeanDice, CheckpointSaver, CheckpointLoader, SegmentationSaver,
                             ValidationHandler, LrScheduleHandler, HausdorffDistance, SurfaceDistance)
@@ -37,30 +38,41 @@ class DeepMitral:
     train_tform = Compose([
         LoadImaged(keys),
         EnsureChannelFirstd(keys),
-        Spacingd(keys, 0.3, diagonal=True, mode=('bilinear', 'nearest')),
+        Spacingd(keys, (0.5, 0.5, 0.5), diagonal=True, mode=('bilinear', 'nearest')),
         Orientationd(keys, axcodes='RAS'),
         ScaleIntensityd("image"),
         CropForegroundd(keys, source_key="image"),
         SpatialPadd(keys, spatial_size=(96,96,96)),
-        RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(96,96,96), pos=0.8, neg=0.2, num_samples=2),
+        RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(96,96,96), pos=0.8, neg=0.2, num_samples=4),
+        EnsureTyped(keys),
+        AsDiscreted(keys='label', to_onehot=True, n_classes=2)
+    ])
+
+    val_tform = Compose([
+        LoadImaged(keys),
+        EnsureChannelFirstd(keys),
+        Spacingd(keys, (0.5, 0.5, 0.5), diagonal=True, mode=('bilinear', 'nearest')),
+        Orientationd(keys, axcodes='RAS'),
+        ScaleIntensityd("image"),
+        CropForegroundd(keys, source_key="image"),
         EnsureTyped(keys),
         AsDiscreted(keys='label', to_onehot=True, n_classes=2)
     ])
 
     seg_tform = Compose([
-        LoadImaged(keys),
-        EnsureChannelFirstd(keys),
-        Spacingd(keys, 0.3, diagonal=True, mode='bilinear'),
-        Orientationd(keys, axcodes='RAS'),
+        LoadImaged('image'),
+        EnsureChannelFirstd('image'),
+        Spacingd('image', (0.5, 0.5, 0.5), diagonal=True, mode='bilinear'),
+        Orientationd('image', axcodes='RAS'),
         ScaleIntensityd("image"),
-        CropForegroundd(keys, source_key="image"),
-        EnsureTyped(keys),
-        AsDiscreted(keys='label', to_onehot=True, n_classes=2)
+        CropForegroundd('image', source_key="image"),
+        EnsureTyped('image'),
     ])
 
     post_tform = Compose(
         [Activationsd(keys='pred', softmax=True),
          AsDiscreted(keys='pred', argmax=True, to_onehot=True, n_classes=2),
+         KeepLargestConnectedComponentd(keys='pred', applied_labels=1)
          # AsDiscreted(keys=('label','pred'), to_onehot=True, n_classes=2),
         ]
     )
@@ -68,7 +80,7 @@ class DeepMitral:
     device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
 
     model = UNet(dimensions=3, in_channels=1, out_channels=2, channels=(16, 32, 64, 128, 256),
-                 strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0.0).to(device)
+                 strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0).to(device)
 
     # model = UNETR(in_channels=1, out_channels=2, img_size=(96,96,96), feature_size=16, hidden_size=768, mlp_dim=3072,
     #               num_heads=12, pos_embed='perceptron', norm_name='instance', dropout_rate=0.2).to(device)
@@ -93,8 +105,8 @@ class DeepMitral:
         # ds = CacheDataset(d, xform)
         persistent_cache = Path("./persistent_cache")
         persistent_cache.mkdir(parents=True, exist_ok=True)
-        ds = PersistentDataset(d, cls.train_tform, persistent_cache)
-        loader = DataLoader(ds, batch_size=3, shuffle=True, num_workers=0, drop_last=True, pin_memory=torch.cuda.is_available())
+        ds = LMDBDataset(d, cls.train_tform, cache_dir=persistent_cache, lmdb_kwargs={'map_size': 2e9})
+        loader = DataLoader(ds, batch_size=8, shuffle=True, num_workers=0, drop_last=True, pin_memory=torch.cuda.is_available())
 
         return loader
 
@@ -114,9 +126,9 @@ class DeepMitral:
         if persistent and not test:
             persistent_cache = Path("./persistent_cache")
             persistent_cache.mkdir(parents=True, exist_ok=True)
-            ds = PersistentDataset(d, cls.seg_tform, persistent_cache)
+            ds = PersistentDataset(d, cls.val_tform, persistent_cache)
         else:
-            ds = Dataset(d, cls.seg_tform)
+            ds = Dataset(d, cls.val_tform)
         loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=0, pin_memory=torch.cuda.is_available())
 
         return loader
@@ -177,7 +189,7 @@ class DeepMitral:
         # def loss(input,target):
         #     return gd(input,target) + bce(input,target)
 
-        loss = DiceCELoss(softmax=True, include_background=False)
+        loss = DiceCELoss(softmax=True, include_background=False, lambda_dice=0.5)
 
         opt = Novograd(net.parameters(), 1e-2)
 
@@ -358,18 +370,22 @@ class DeepMitral:
             device=device,
             val_data_loader=loader,
             network=net,
-            decollate=False,
-            inferer=SlidingWindowInferer((96,96,96), sw_batch_size=6),
+            inferer=SlidingWindowInferer((96,96,96), sw_batch_size=24),
         )
 
-        logdir = Path(load_checkpoint).parent.joinpath('out')
+        logdir = Path(data).joinpath('out')
+
+        def tx(output):
+            for x in output:
+                x['label'] = torch.zeros(x['image'].size())
+            return predict_segmentation(cls.output_tform(output)[0], mutually_exclusive=True)
 
         prediction_saver = SegmentationSaver(
             output_dir=logdir,
             name="evaluator",
             dtype=np.dtype('float64'),
-            batch_transform=lambda batch: batch["image_meta_dict"],
-            output_transform=lambda output: predict_segmentation(output['pred'])
+            batch_transform=lambda batch: list_data_collate(batch)["image_meta_dict"],
+            output_transform=tx
         )
         prediction_saver.attach(evaluator)
 
