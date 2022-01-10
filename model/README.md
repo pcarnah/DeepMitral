@@ -4,4 +4,3 @@ P. Carnahan, J. Moore, D. Bainbridge, M. Eskandari, E. C. S. Chen and T. M. Pete
 
 
 Trained and tested on MONAI version 0.7 and PyTorch version 1.8.2
-
