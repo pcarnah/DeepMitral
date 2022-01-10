@@ -10,11 +10,12 @@ import random
 import monai
 from monai import config
 from monai.data import Dataset, DataLoader, GridPatchDataset, CacheDataset, PersistentDataset, LMDBDataset
-from monai.data.utils import list_data_collate
+from monai.data.utils import list_data_collate, decollate_batch
+from monai.inferers import sliding_window_inference
 from monai.transforms import (Compose, LoadImaged, Orientationd, ScaleIntensityd,
                               EnsureChannelFirstd, ToTensord, CropForegroundd, Spacingd, RandSpatialCropSamplesd,
                               Invertd, RandCropByPosNegLabeld, AsDiscreted, EnsureTyped, Activationsd, SpatialPadd, DataStatsd,
-                              KeepLargestConnectedComponentd)
+                              KeepLargestConnectedComponentd, SaveImage, AsDiscrete)
 from monai.handlers import (StatsHandler, TensorBoardStatsHandler, TensorBoardImageHandler,
                             MeanDice, CheckpointSaver, CheckpointLoader, SegmentationSaver,
                             ValidationHandler, LrScheduleHandler, HausdorffDistance, SurfaceDistance)
@@ -65,7 +66,7 @@ class DeepMitral:
         Spacingd('image', (0.5, 0.5, 0.5), diagonal=True, mode='bilinear'),
         Orientationd('image', axcodes='RAS'),
         ScaleIntensityd("image"),
-        CropForegroundd('image', source_key="image"),
+        # CropForegroundd('image', source_key="image"),                 Causes issues on save, change in origin not accounted for
         EnsureTyped('image'),
     ])
 
@@ -343,6 +344,7 @@ class DeepMitral:
         def tx(output):
             return predict_segmentation(cls.output_tform(output)[0], mutually_exclusive=True)
 
+
         prediction_saver = SegmentationSaver(
             output_dir=logdir,
             name="evaluator",
@@ -363,33 +365,30 @@ class DeepMitral:
 
         loader = cls.load_seg_data(data)
 
-        device = torch.device('cuda:0')
+        device = cls.device
         net = cls.load_model(load_checkpoint)
-
-        evaluator = SupervisedEvaluator(
-            device=device,
-            val_data_loader=loader,
-            network=net,
-            inferer=SlidingWindowInferer((96,96,96), sw_batch_size=24),
-        )
 
         logdir = Path(data).joinpath('out')
 
-        def tx(output):
-            for x in output:
-                x['label'] = torch.zeros(x['image'].size())
-            return predict_segmentation(cls.output_tform(output)[0], mutually_exclusive=True)
+        pred = AsDiscrete(argmax=True)
 
-        prediction_saver = SegmentationSaver(
-            output_dir=logdir,
-            name="evaluator",
-            dtype=np.dtype('float64'),
-            batch_transform=lambda batch: list_data_collate(batch)["image_meta_dict"],
-            output_transform=tx
+        saver = SaveImage(
+            output_dir=str(logdir),
+            output_postfix="seg",
+            output_ext=".nii.gz",
+            output_dtype=np.uint8,
         )
-        prediction_saver.attach(evaluator)
 
-        evaluator.run()
+        net.eval()
+        with torch.no_grad():
+            for batch in loader:
+                out = sliding_window_inference(batch['image'].to(device), (96,96,96), 16, net)
+                out = cls.post_tform(decollate_batch({'pred': out}))
+                meta_dict = decollate_batch(batch["image_meta_dict"])
+                for o, m in zip(out, meta_dict):
+                    saver(pred(o['pred']), m)
+
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='DeepMV training')
