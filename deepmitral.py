@@ -8,6 +8,7 @@ import argparse
 import random
 
 import monai
+from ignite.metrics import Average
 from monai import config
 from monai.data import Dataset, DataLoader, GridPatchDataset, CacheDataset, PersistentDataset, LMDBDataset
 from monai.data.utils import list_data_collate, decollate_batch
@@ -17,8 +18,9 @@ from monai.transforms import (Compose, LoadImaged, Orientationd, ScaleIntensityd
                               Invertd, RandCropByPosNegLabeld, AsDiscreted, EnsureTyped, Activationsd, SpatialPadd, DataStatsd,
                               KeepLargestConnectedComponentd, SaveImage, AsDiscrete)
 from monai.handlers import (StatsHandler, TensorBoardStatsHandler, TensorBoardImageHandler,
-                            MeanDice, CheckpointSaver, CheckpointLoader, SegmentationSaver,
+                            MeanDice, CheckpointSaver, CheckpointLoader,
                             ValidationHandler, LrScheduleHandler, HausdorffDistance, SurfaceDistance)
+from monai.metrics import GeneralizedDiceScore, HausdorffDistanceMetric, SurfaceDistanceMetric
 from monai.networks import predict_segmentation
 from monai.networks.nets import *
 from monai.networks.layers import Norm
@@ -46,7 +48,7 @@ class DeepMitral:
         SpatialPadd(keys, spatial_size=(96,96,96)),
         RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(96,96,96), pos=0.8, neg=0.2, num_samples=4),
         EnsureTyped(keys),
-        AsDiscreted(keys='label', to_onehot=True, n_classes=2)
+        AsDiscreted(keys='label', to_onehot=2)
     ])
 
     val_tform = Compose([
@@ -57,7 +59,7 @@ class DeepMitral:
         ScaleIntensityd("image"),
         CropForegroundd(keys, source_key="image"),
         EnsureTyped(keys),
-        AsDiscreted(keys='label', to_onehot=True, n_classes=2)
+        AsDiscreted(keys='label', to_onehot=2)
     ])
 
     seg_tform = Compose([
@@ -72,7 +74,7 @@ class DeepMitral:
 
     post_tform = Compose(
         [Activationsd(keys='pred', softmax=True),
-         AsDiscreted(keys='pred', argmax=True, to_onehot=True, n_classes=2),
+         AsDiscreted(keys='pred', argmax=True, to_onehot=2),
          KeepLargestConnectedComponentd(keys='pred', applied_labels=1)
          # AsDiscreted(keys=('label','pred'), to_onehot=True, n_classes=2),
         ]
@@ -81,7 +83,7 @@ class DeepMitral:
     device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
 
     model = UNet(dimensions=3, in_channels=1, out_channels=2, channels=(16, 32, 64, 128, 256),
-                 strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0).to(device)
+                 strides=(2, 2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0).to(device)
 
     # model = UNETR(in_channels=1, out_channels=2, img_size=(96,96,96), feature_size=16, hidden_size=768, mlp_dim=3072,
     #               num_heads=12, pos_embed='perceptron', norm_name='instance', dropout_rate=0.2).to(device)
@@ -106,7 +108,7 @@ class DeepMitral:
         # ds = CacheDataset(d, xform)
         persistent_cache = Path("./persistent_cache")
         persistent_cache.mkdir(parents=True, exist_ok=True)
-        ds = LMDBDataset(d, cls.train_tform, cache_dir=persistent_cache, lmdb_kwargs={'map_size': 2e9})
+        ds = LMDBDataset(d, cls.train_tform, cache_dir=persistent_cache, lmdb_kwargs={'writemap': True, 'map_size': 100000000})
         loader = DataLoader(ds, batch_size=8, shuffle=True, num_workers=0, drop_last=True, pin_memory=torch.cuda.is_available())
 
         return loader
@@ -197,7 +199,7 @@ class DeepMitral:
         # trainer = create_supervised_trainer(net, opt, loss, device, False, )
         trainer = SupervisedTrainer(
             device=cls.device,
-            max_epochs=2000,
+            max_epochs=1,
             train_data_loader=loader,
             network=net,
             optimizer=opt,
@@ -247,8 +249,8 @@ class DeepMitral:
 
         test = monai.utils.first(loader)['image']
 
-        tb_writer = SummaryWriter(log_dir=logdir)
-        tb_writer.add_graph(net, monai.utils.first(loader)['image'].to(cls.device))
+        tb_writer = SummaryWriter(log_dir=str(logdir))
+        tb_writer.add_graph(net, monai.utils.first(loader)['image'].to(cls.device).as_tensor())
 
         # TensorBoardStatsHandler plots loss at every iteration and plots metrics at every epoch, same as StatsHandler
         train_tensorboard_stats_handler = TensorBoardStatsHandler(
@@ -312,52 +314,52 @@ class DeepMitral:
         config.print_config()
 
         if not data:
-            loader = cls.load_val_data("U:/Documents/DeepMV/data", test=use_test)
+            data = "U:/Documents/DeepMV/data"
+            loader = cls.load_val_data(data, test=use_test)
         else:
             loader = cls.load_val_data(data, False, test=use_test)
 
         net = cls.load_model(load_checkpoint)
-
-        evaluator = SupervisedEvaluator(
-            device=cls.device,
-            val_data_loader=loader,
-            network=net,
-            inferer=SlidingWindowInferer((96, 96, 96), sw_batch_size=6),
-            key_val_metric={"val_meandice": MeanDice(output_transform=cls.output_tform)},
-            additional_metrics={
-                'HausdorffDistance': HausdorffDistance(percentile=95, include_background=True, output_transform=cls.output_tform),
-                'AvgSurfaceDistance': SurfaceDistance(include_background=True, output_transform=cls.output_tform)},
-        )
-
-        # checkpoint_loader = CheckpointLoader(load_checkpoint, {'net': net})
-        # checkpoint_loader.attach(evaluator)
+        device = cls.device
 
         logdir = Path(load_checkpoint).parent.joinpath('out')
 
-        # add stats event handler to print validation stats via evaluator
-        val_stats_handler = StatsHandler(
-            name="evaluator",
-            output_transform=lambda x: None,
-            global_epoch_transform=lambda x: 0)
-        val_stats_handler.attach(evaluator)
+        pred = AsDiscrete(argmax=True)
 
-        def tx(output):
-            return predict_segmentation(cls.output_tform(output)[0], mutually_exclusive=True)
-
-
-        prediction_saver = SegmentationSaver(
-            output_dir=logdir,
-            name="evaluator",
-            dtype=np.dtype('float64'),
-            batch_transform=lambda batch: list_data_collate(batch)["image_meta_dict"],
-            output_transform=tx
+        saver = SaveImage(
+            output_dir=str(logdir),
+            output_postfix="seg",
+            output_ext=".nii.gz",
+            output_dtype=np.uint8,
         )
-        prediction_saver.attach(evaluator)
+
+        mean_dice = GeneralizedDiceScore()
+        hd = HausdorffDistanceMetric(percentile=95, include_background=True)
+        sd = SurfaceDistanceMetric(include_background=True)
 
         start = timer()
-        evaluator.run()
+        net.eval()
+        with torch.no_grad():
+            for batch in loader:
+                label = batch['label'].to(device)
+                out = sliding_window_inference(batch['image'].to(device), (96, 96, 96), 16, net)
+                out = cls.post_tform(decollate_batch({'pred': out}))
+
+                mean_dice(list_data_collate(out)['pred'].cpu(), label.cpu())
+                hd(list_data_collate(out)['pred'].cpu(), label.cpu())
+                sd(list_data_collate(out)['pred'].cpu(), label.cpu())
+
+                meta_dict = decollate_batch(batch["image_meta_dict"])
+                for o, m in zip(out, meta_dict):
+                    saver(pred(o['pred']), m)
+
         end = timer()
-        print(evaluator.get_validation_stats(), "took {}s".format(end-start))
+
+        print("Metric Mean_Dice: {}".format(mean_dice.aggregate().item()))
+        print("Metric Mean_HD: {}".format(hd.aggregate().item()))
+        print("Metric Mean_SD: {}".format(sd.aggregate().item()))
+        print("Elapsed Time: {}s".format(end - start))
+
 
     @classmethod
     def segment(cls, load_checkpoint, data):
