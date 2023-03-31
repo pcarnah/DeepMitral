@@ -1,3 +1,5 @@
+import os
+import platform
 from pathlib import Path
 
 import numpy as np
@@ -37,16 +39,19 @@ from timeit import default_timer as timer
 
 class DeepMitral:
 
+    spacing = 0.3
+    train_epochs = 500
+
     keys = ("image", "label")
     train_tform = Compose([
         LoadImaged(keys),
         EnsureChannelFirstd(keys),
-        Spacingd(keys, (0.5, 0.5, 0.5), diagonal=True, mode=('bilinear', 'nearest')),
+        Spacingd(keys, (spacing, spacing, spacing), diagonal=True, mode=('bilinear', 'nearest')),
         Orientationd(keys, axcodes='RAS'),
         ScaleIntensityd("image"),
         CropForegroundd(keys, source_key="image"),
         SpatialPadd(keys, spatial_size=(96,96,96)),
-        RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(96,96,96), pos=0.8, neg=0.2, num_samples=4),
+        RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(96,96,96), pos=0.8, neg=0.2, num_samples=8),
         EnsureTyped(keys),
         AsDiscreted(keys='label', to_onehot=2)
     ])
@@ -54,10 +59,9 @@ class DeepMitral:
     val_tform = Compose([
         LoadImaged(keys),
         EnsureChannelFirstd(keys),
-        Spacingd(keys, (0.5, 0.5, 0.5), diagonal=True, mode=('bilinear', 'nearest')),
+        Spacingd(keys, (spacing, spacing, spacing), diagonal=True, mode=('bilinear', 'nearest')),
         Orientationd(keys, axcodes='RAS'),
         ScaleIntensityd("image"),
-        CropForegroundd(keys, source_key="image"),
         EnsureTyped(keys),
         AsDiscreted(keys='label', to_onehot=2)
     ])
@@ -65,10 +69,9 @@ class DeepMitral:
     seg_tform = Compose([
         LoadImaged('image'),
         EnsureChannelFirstd('image'),
-        Spacingd('image', (0.5, 0.5, 0.5), diagonal=True, mode='bilinear'),
+        Spacingd('image', (spacing, spacing, spacing), diagonal=True, mode='bilinear'),
         Orientationd('image', axcodes='RAS'),
         ScaleIntensityd("image"),
-        # CropForegroundd('image', source_key="image"),                 Causes issues on save, change in origin not accounted for
         EnsureTyped('image'),
     ])
 
@@ -82,8 +85,10 @@ class DeepMitral:
 
     device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
 
-    model = UNet(dimensions=3, in_channels=1, out_channels=2, channels=(16, 32, 64, 128, 256),
-                 strides=(2, 2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0).to(device)
+    model = UNet(spatial_dims=3, in_channels=1, out_channels=2, channels=(16, 32, 64, 128, 256),
+                 strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0).to(device)
+
+    # model = FlexibleUNet(spatial_dims=3, in_channels=1, out_channels=2, backbone='efficientnet-b0', act='memswish').to(device)
 
     # model = UNETR(in_channels=1, out_channels=2, img_size=(96,96,96), feature_size=16, hidden_size=768, mlp_dim=3072,
     #               num_heads=12, pos_embed='perceptron', norm_name='instance', dropout_rate=0.2).to(device)
@@ -105,11 +110,15 @@ class DeepMitral:
 
         d = [{"image": im, "label": seg} for im, seg in zip(images, segs)]
 
-        # ds = CacheDataset(d, xform)
-        persistent_cache = Path("./persistent_cache")
-        persistent_cache.mkdir(parents=True, exist_ok=True)
-        ds = LMDBDataset(d, cls.train_tform, cache_dir=persistent_cache, lmdb_kwargs={'writemap': True, 'map_size': 100000000})
-        loader = DataLoader(ds, batch_size=8, shuffle=True, num_workers=0, drop_last=True, pin_memory=torch.cuda.is_available())
+        # if platform.system() == 'Windows':
+        #     persistent_cache = Path("./persistent_cache")
+        #     persistent_cache.mkdir(parents=True, exist_ok=True)
+        #     ds = LMDBDataset(d, cls.train_tform, cache_dir=persistent_cache,
+        #                      lmdb_kwargs={'writemap': True, 'map_size': 100000000})
+        # else:
+        #     num_workers = os.cpu_count()
+        ds = CacheDataset(d, cls.train_tform)
+        loader = DataLoader(ds, batch_size=4, shuffle=True, num_workers=0, drop_last=True, pin_memory=torch.cuda.is_available())
 
         return loader
 
@@ -194,12 +203,12 @@ class DeepMitral:
 
         loss = DiceCELoss(softmax=True, include_background=False, lambda_dice=0.5)
 
-        opt = Novograd(net.parameters(), 1e-2)
+        opt = Novograd(net.parameters(), 1e-3)
 
         # trainer = create_supervised_trainer(net, opt, loss, device, False, )
         trainer = SupervisedTrainer(
             device=cls.device,
-            max_epochs=1,
+            max_epochs=cls.train_epochs,
             train_data_loader=loader,
             network=net,
             optimizer=opt,
@@ -222,7 +231,7 @@ class DeepMitral:
             logdir = Path(load_checkpoint).parent
 
         else:
-            logdir = Path('./runs/')
+            logdir = Path(dataPath).joinpath('runs')
             logdir.mkdir(exist_ok=True)
             dirs = sorted([int(x.name) for x in logdir.iterdir() if x.is_dir()])
             if not dirs:
@@ -268,10 +277,10 @@ class DeepMitral:
             network=net,
             inferer=SlidingWindowInferer((96, 96, 96), sw_batch_size=6),
             # decollate=False,
-            key_val_metric={"val_meandice": MeanDice(output_transform=cls.output_tform)},
+            key_val_metric={"val_meandice": MeanDice(output_transform=cls.output_tform, include_background=False)},
             additional_metrics={
-                'HausdorffDistance': HausdorffDistance(percentile=95, output_transform=cls.output_tform),
-                'AvgSurfaceDistance': SurfaceDistance(output_transform=cls.output_tform)},
+                'HausdorffDistance': HausdorffDistance(percentile=95, output_transform=cls.output_tform, include_background=False),
+                'AvgSurfaceDistance': SurfaceDistance(output_transform=cls.output_tform, include_background=False)},
         )
 
         val_stats_handler = StatsHandler(
@@ -284,7 +293,7 @@ class DeepMitral:
         val_tensorboard_stats_handler = TensorBoardStatsHandler(
             summary_writer=tb_writer,
             output_transform=lambda x: None,  # no need to plot loss value, so disable per iteration output
-            global_epoch_transform=lambda x: trainer.state.epoch)  # fetch global epoch number from trainer
+            global_epoch_transform=lambda x: trainer.state.epoch,)  # fetch global epoch number from trainer
         val_tensorboard_stats_handler.attach(evaluator)
 
         # add handler to draw the first image and the corresponding label and model output in the last batch
@@ -334,15 +343,18 @@ class DeepMitral:
         )
 
         mean_dice = GeneralizedDiceScore()
-        hd = HausdorffDistanceMetric(percentile=95, include_background=True)
-        sd = SurfaceDistanceMetric(include_background=True)
+        hd = HausdorffDistanceMetric(percentile=95, include_background=False)
+        sd = SurfaceDistanceMetric(include_background=False)
 
         start = timer()
         net.eval()
+
+        frozen_mod = torch.jit.optimize_for_inference(torch.jit.script(net))
+
         with torch.no_grad():
             for batch in loader:
                 label = batch['label'].to(device)
-                out = sliding_window_inference(batch['image'].to(device), (96, 96, 96), 16, net)
+                out = sliding_window_inference(batch['image'].to(device), (96, 96, 96), 16, frozen_mod)
                 out = cls.post_tform(decollate_batch({'pred': out}))
 
                 mean_dice(list_data_collate(out)['pred'].cpu(), label.cpu())
@@ -356,8 +368,8 @@ class DeepMitral:
         end = timer()
 
         print("Metric Mean_Dice: {}".format(mean_dice.aggregate().item()))
-        print("Metric Mean_HD: {}".format(hd.aggregate().item()))
-        print("Metric Mean_SD: {}".format(sd.aggregate().item()))
+        print("Metric Mean_HD: {}".format(hd.aggregate().item() * cls.spacing))
+        print("Metric Mean_SD: {}".format(sd.aggregate().item() * cls.spacing))
         print("Elapsed Time: {}s".format(end - start))
 
 
