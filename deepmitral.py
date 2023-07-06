@@ -1,6 +1,7 @@
 import os
 import platform
 from pathlib import Path
+from typing import Tuple
 
 import numpy as np
 import logging
@@ -93,17 +94,21 @@ class DeepMitral:
     # model = UNETR(in_channels=1, out_channels=2, img_size=(96,96,96), feature_size=16, hidden_size=768, mlp_dim=3072,
     #               num_heads=12, pos_embed='perceptron', norm_name='instance', dropout_rate=0.2).to(device)
 
+    # model = SwinUNETR((96, 96, 96), 1, 2, depths=(2, 4, 2, 2), feature_size=12).to(device)
+
+    trainer = None
+
     @classmethod
     def load_train_data(cls, path, use_val=False):
         train_path = Path(path).joinpath('train')
 
-        images = [str(p.absolute()) for p in train_path.glob("*US.nii")]
-        segs = [str(p.absolute()) for p in train_path.glob("*label.nii")]
+        images = [str(p.absolute()) for p in train_path.glob("*US.nii*")]
+        segs = [str(p.absolute()) for p in train_path.glob("*label.nii*")]
 
         if use_val:
             val_path = Path(path).joinpath('val')
-            images += [str(p.absolute()) for p in val_path.glob("*US.nii")]
-            segs += [str(p.absolute()) for p in val_path.glob("*label.nii")]
+            images += [str(p.absolute()) for p in val_path.glob("*US.nii*")]
+            segs += [str(p.absolute()) for p in val_path.glob("*label.nii*")]
 
         images.sort()
         segs.sort()
@@ -118,7 +123,7 @@ class DeepMitral:
         # else:
         #     num_workers = os.cpu_count()
         ds = CacheDataset(d, cls.train_tform)
-        loader = DataLoader(ds, batch_size=4, shuffle=True, num_workers=0, drop_last=True, pin_memory=torch.cuda.is_available())
+        loader = DataLoader(ds, batch_size=1, shuffle=True, num_workers=0, drop_last=True, pin_memory=torch.cuda.is_available())
 
         return loader
 
@@ -130,8 +135,8 @@ class DeepMitral:
             path = Path(path).joinpath('test')
 
         random.seed(0)
-        images = sorted(str(p.absolute()) for p in path.glob("*US.nii"))
-        segs = sorted(str(p.absolute()) for p in path.glob("*label.nii"))
+        images = sorted(str(p.absolute()) for p in path.glob("*US.nii*"))
+        segs = sorted(str(p.absolute()) for p in path.glob("*label.nii*"))
         d = [{"image": im, "label": seg} for im, seg in zip(images, segs)]
 
         # ds = CacheDataset(d, xform)
@@ -150,7 +155,7 @@ class DeepMitral:
         path = Path(path)
 
         random.seed(0)
-        images = [str(p.absolute()) for p in path.glob("*.nii")]
+        images = [str(p.absolute()) for p in path.glob("*.nii*")]
         d = [{"image": im} for im in images]
 
         # ds = CacheDataset(d, xform)
@@ -217,6 +222,7 @@ class DeepMitral:
             key_train_metric={"train_meandice": MeanDice(output_transform=cls.output_tform)},
             amp=True
         )
+        cls.trainer = trainer
 
         # Load checkpoint if defined
         if load_checkpoint:
@@ -259,7 +265,7 @@ class DeepMitral:
         test = monai.utils.first(loader)['image']
 
         tb_writer = SummaryWriter(log_dir=str(logdir))
-        tb_writer.add_graph(net, monai.utils.first(loader)['image'].to(cls.device).as_tensor())
+        # tb_writer.add_graph(net, monai.utils.first(loader)['image'].to(cls.device).as_tensor())
 
         # TensorBoardStatsHandler plots loss at every iteration and plots metrics at every epoch, same as StatsHandler
         train_tensorboard_stats_handler = TensorBoardStatsHandler(
@@ -354,7 +360,7 @@ class DeepMitral:
         with torch.no_grad():
             for batch in loader:
                 label = batch['label'].to(device)
-                out = sliding_window_inference(batch['image'].to(device), (96, 96, 96), 16, frozen_mod)
+                out = sliding_window_inference(batch['image'].to(device), (96, 96, 96), 8, frozen_mod)
                 out = cls.post_tform(decollate_batch({'pred': out}))
 
                 mean_dice(list_data_collate(out)['pred'].cpu(), label.cpu())
@@ -396,11 +402,24 @@ class DeepMitral:
         net.eval()
         with torch.no_grad():
             for batch in loader:
-                out = sliding_window_inference(batch['image'].to(device), (96,96,96), 16, net)
+                with torch.cuda.amp.autocast():
+                    out = sliding_window_inference(batch['image'].to(device), (96,96,96), 16, net)
                 out = cls.post_tform(decollate_batch({'pred': out}))
                 meta_dict = decollate_batch(batch["image_meta_dict"])
                 for o, m in zip(out, meta_dict):
                     saver(pred(o['pred']), m)
+
+    @classmethod
+    def handle_sigint(cls, signum, frame):
+        if cls.trainer:
+            msg = "Ctrl-c was pressed. Stopping run at epoch {}.".format(cls.trainer.state.epoch)
+            cls.trainer.should_terminate = True
+            cls.trainer.should_terminate_single_epoch = True
+        else:
+            msg = "Ctrl-c was pressed. Stopping run."
+            print(msg, flush=True)
+            exit(1)
+        print(msg, flush=True)
 
 
 
