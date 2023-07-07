@@ -41,7 +41,8 @@ from timeit import default_timer as timer
 class DeepMitral:
 
     spacing = 0.3
-    train_epochs = 500
+    train_epochs = 2000
+    n_classes = 3
 
     keys = ("image", "label")
     train_tform = Compose([
@@ -54,7 +55,7 @@ class DeepMitral:
         SpatialPadd(keys, spatial_size=(96,96,96)),
         RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(96,96,96), pos=0.8, neg=0.2, num_samples=8),
         EnsureTyped(keys),
-        AsDiscreted(keys='label', to_onehot=2)
+        AsDiscreted(keys='label', to_onehot=n_classes)
     ])
 
     val_tform = Compose([
@@ -64,7 +65,7 @@ class DeepMitral:
         Orientationd(keys, axcodes='RAS'),
         ScaleIntensityd("image"),
         EnsureTyped(keys),
-        AsDiscreted(keys='label', to_onehot=2)
+        AsDiscreted(keys='label', to_onehot=n_classes)
     ])
 
     seg_tform = Compose([
@@ -78,15 +79,15 @@ class DeepMitral:
 
     post_tform = Compose(
         [Activationsd(keys='pred', softmax=True),
-         AsDiscreted(keys='pred', argmax=True, to_onehot=2),
-         KeepLargestConnectedComponentd(keys='pred', applied_labels=1)
+         AsDiscreted(keys='pred', argmax=True, to_onehot=n_classes),
+         KeepLargestConnectedComponentd(keys='pred', applied_labels=list(range(1,n_classes)))
          # AsDiscreted(keys=('label','pred'), to_onehot=True, n_classes=2),
         ]
     )
 
     device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
 
-    model = UNet(spatial_dims=3, in_channels=1, out_channels=2, channels=(16, 32, 64, 128, 256),
+    model = UNet(spatial_dims=3, in_channels=1, out_channels=n_classes, channels=(16, 32, 64, 128, 256),
                  strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0).to(device)
 
     # model = FlexibleUNet(spatial_dims=3, in_channels=1, out_channels=2, backbone='efficientnet-b0', act='memswish').to(device)
@@ -115,15 +116,15 @@ class DeepMitral:
 
         d = [{"image": im, "label": seg} for im, seg in zip(images, segs)]
 
-        # if platform.system() == 'Windows':
-        #     persistent_cache = Path("./persistent_cache")
-        #     persistent_cache.mkdir(parents=True, exist_ok=True)
-        #     ds = LMDBDataset(d, cls.train_tform, cache_dir=persistent_cache,
-        #                      lmdb_kwargs={'writemap': True, 'map_size': 100000000})
-        # else:
-        #     num_workers = os.cpu_count()
-        ds = CacheDataset(d, cls.train_tform)
-        loader = DataLoader(ds, batch_size=1, shuffle=True, num_workers=0, drop_last=True, pin_memory=torch.cuda.is_available())
+        if platform.system() == 'Windows':
+            persistent_cache = Path("./persistent_cache")
+            persistent_cache.mkdir(parents=True, exist_ok=True)
+            ds = LMDBDataset(d, cls.train_tform, cache_dir=persistent_cache,
+                             lmdb_kwargs={'writemap': True, 'map_size': 100000000})
+        else:
+            num_workers = os.cpu_count()
+        # ds = CacheDataset(d, cls.train_tform)
+        loader = DataLoader(ds, batch_size=4, shuffle=True, num_workers=0, drop_last=True, pin_memory=torch.cuda.is_available())
 
         return loader
 
@@ -139,7 +140,7 @@ class DeepMitral:
         segs = sorted(str(p.absolute()) for p in path.glob("*label.nii*"))
         d = [{"image": im, "label": seg} for im, seg in zip(images, segs)]
 
-        # ds = CacheDataset(d, xform)
+        # ds = CacheDataset(d, cls.val_tform)
         if persistent and not test:
             persistent_cache = Path("./persistent_cache")
             persistent_cache.mkdir(parents=True, exist_ok=True)
