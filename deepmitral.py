@@ -1,48 +1,39 @@
+import argparse
+import logging
 import os
 import platform
-from pathlib import Path
-from typing import Tuple
-
-import numpy as np
-import logging
-import sys
-import torch
-import argparse
 import random
-
-import monai
-from ignite.metrics import Average
-from monai import config
-from monai.data import Dataset, DataLoader, GridPatchDataset, CacheDataset, PersistentDataset, LMDBDataset
-from monai.data.utils import list_data_collate, decollate_batch
-from monai.inferers import sliding_window_inference
-from monai.transforms import (Compose, LoadImaged, Orientationd, ScaleIntensityd,
-                              EnsureChannelFirstd, ToTensord, CropForegroundd, Spacingd, RandSpatialCropSamplesd,
-                              Invertd, RandCropByPosNegLabeld, AsDiscreted, EnsureTyped, Activationsd, SpatialPadd, DataStatsd,
-                              KeepLargestConnectedComponentd, SaveImage, AsDiscrete)
-from monai.handlers import (StatsHandler, TensorBoardStatsHandler, TensorBoardImageHandler,
-                            MeanDice, CheckpointSaver, CheckpointLoader,
-                            ValidationHandler, LrScheduleHandler, HausdorffDistance, SurfaceDistance)
-from monai.metrics import GeneralizedDiceScore, HausdorffDistanceMetric, SurfaceDistanceMetric
-from monai.networks import predict_segmentation
-from monai.networks.nets import *
-from monai.networks.layers import Norm
-from monai.optimizers import Novograd
-from monai.losses import DiceLoss, GeneralizedDiceLoss, DiceCELoss
-from monai.inferers import SlidingWindowInferer
-from monai.engines import SupervisedTrainer, SupervisedEvaluator
-
-from torch.utils.tensorboard import SummaryWriter
-from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau
-
-
+import sys
+from pathlib import Path
 from timeit import default_timer as timer
 
-class DeepMitral:
+import numpy as np
+import torch
+from monai import config
+from monai.data import Dataset, DataLoader, PersistentDataset, LMDBDataset, CacheDataset
+from monai.data.utils import list_data_collate, decollate_batch
+from monai.engines import SupervisedTrainer, SupervisedEvaluator
+from monai.handlers import (StatsHandler, TensorBoardStatsHandler, MeanDice, CheckpointSaver, CheckpointLoader,
+                            ValidationHandler, LrScheduleHandler, HausdorffDistance, SurfaceDistance)
+from monai.inferers import SlidingWindowInferer
+from monai.inferers import sliding_window_inference
+from monai.losses import DiceCELoss
+from monai.metrics import GeneralizedDiceScore, HausdorffDistanceMetric, SurfaceDistanceMetric
+from monai.networks.layers import Norm
+from monai.networks.nets import *
+from monai.optimizers import Novograd
+from monai.transforms import (Compose, LoadImaged, Orientationd, ScaleIntensityd,
+                              EnsureChannelFirstd, CropForegroundd, Spacingd, RandCropByPosNegLabeld, AsDiscreted,
+                              EnsureTyped, Activationsd, SpatialPadd,
+                              KeepLargestConnectedComponentd, SaveImage, AsDiscrete)
+from torch.optim.lr_scheduler import StepLR
+from torch.utils.tensorboard import SummaryWriter
 
+
+class DeepMitral:
     spacing = 0.3
     train_epochs = 2000
-    n_classes = 3
+    n_classes = 2
 
     keys = ("image", "label")
     train_tform = Compose([
@@ -52,8 +43,8 @@ class DeepMitral:
         Orientationd(keys, axcodes='RAS'),
         ScaleIntensityd("image"),
         CropForegroundd(keys, source_key="image"),
-        SpatialPadd(keys, spatial_size=(96,96,96)),
-        RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(96,96,96), pos=0.8, neg=0.2, num_samples=8),
+        SpatialPadd(keys, spatial_size=(96, 96, 96)),
+        RandCropByPosNegLabeld(keys, label_key='label', spatial_size=(96, 96, 96), pos=0.8, neg=0.2, num_samples=8),
         EnsureTyped(keys),
         AsDiscreted(keys='label', to_onehot=n_classes)
     ])
@@ -80,22 +71,15 @@ class DeepMitral:
     post_tform = Compose(
         [Activationsd(keys='pred', softmax=True),
          AsDiscreted(keys='pred', argmax=True, to_onehot=n_classes),
-         KeepLargestConnectedComponentd(keys='pred', applied_labels=list(range(1,n_classes)))
+         KeepLargestConnectedComponentd(keys='pred', applied_labels=list(range(1, n_classes)))
          # AsDiscreted(keys=('label','pred'), to_onehot=True, n_classes=2),
-        ]
+         ]
     )
 
     device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
 
     model = UNet(spatial_dims=3, in_channels=1, out_channels=n_classes, channels=(16, 32, 64, 128, 256),
                  strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH, dropout=0).to(device)
-
-    # model = FlexibleUNet(spatial_dims=3, in_channels=1, out_channels=2, backbone='efficientnet-b0', act='memswish').to(device)
-
-    # model = UNETR(in_channels=1, out_channels=2, img_size=(96,96,96), feature_size=16, hidden_size=768, mlp_dim=3072,
-    #               num_heads=12, pos_embed='perceptron', norm_name='instance', dropout_rate=0.2).to(device)
-
-    # model = SwinUNETR((96, 96, 96), 1, 2, depths=(2, 4, 2, 2), feature_size=12).to(device)
 
     trainer = None
 
@@ -121,19 +105,21 @@ class DeepMitral:
             persistent_cache.mkdir(parents=True, exist_ok=True)
             ds = LMDBDataset(d, cls.train_tform, cache_dir=persistent_cache,
                              lmdb_kwargs={'writemap': True, 'map_size': 100000000})
+            num_workers = 0
         else:
             num_workers = os.cpu_count()
-        # ds = CacheDataset(d, cls.train_tform)
-        loader = DataLoader(ds, batch_size=4, shuffle=True, num_workers=0, drop_last=True, pin_memory=torch.cuda.is_available())
+            ds = CacheDataset(d, cls.train_tform)
+        loader = DataLoader(ds, batch_size=4, shuffle=True, num_workers=num_workers, drop_last=True,
+                            pin_memory=torch.cuda.is_available())
 
         return loader
 
     @classmethod
-    def load_val_data(cls, path, persistent=True, test=False):
+    def load_val_data(cls, data_path, persistent=True, test=False):
         if not test:
-            path = Path(path).joinpath('val')
+            path = Path(data_path).joinpath('val')
         else:
-            path = Path(path).joinpath('test')
+            path = Path(data_path).joinpath('test')
 
         random.seed(0)
         images = sorted(str(p.absolute()) for p in path.glob("*US.nii*"))
@@ -189,29 +175,18 @@ class DeepMitral:
         config.print_config()
 
         if not data:
-            dataPath = "U:/Documents/DeepMV/data/"
+            data_path = "U:/Documents/DeepMV/data/"
         else:
-            dataPath = data
+            data_path = data
 
-        loader = cls.load_train_data(dataPath, use_val=use_val)
+        loader = cls.load_train_data(data_path, use_val=use_val)
 
         net = cls.model
-
-        # loss = GeneralizedDiceLoss(sigmoid=True)
-        # loss = SDWeightedDiceLoss(sigmoid=True)
-        # opt = torch.optim.Adam(net.parameters(), 1e-3)
-
-        # gd = GeneralizedDiceLoss(sigmoid=True)
-        # bce = torch.nn.BCEWithLogitsLoss()
-        #
-        # def loss(input,target):
-        #     return gd(input,target) + bce(input,target)
 
         loss = DiceCELoss(softmax=True, include_background=False, lambda_dice=0.5)
 
         opt = Novograd(net.parameters(), 1e-3)
 
-        # trainer = create_supervised_trainer(net, opt, loss, device, False, )
         trainer = SupervisedTrainer(
             device=cls.device,
             max_epochs=cls.train_epochs,
@@ -238,7 +213,7 @@ class DeepMitral:
             logdir = Path(load_checkpoint).parent
 
         else:
-            logdir = Path(dataPath).joinpath('runs')
+            logdir = Path(data_path).joinpath('runs')
             logdir.mkdir(exist_ok=True)
             dirs = sorted([int(x.name) for x in logdir.iterdir() if x.is_dir()])
             if not dirs:
@@ -251,9 +226,9 @@ class DeepMitral:
         lr_handler = LrScheduleHandler(lr_scheduler)
         lr_handler.attach(trainer)
 
-        ### optional section for checkpoint and tensorboard logging
         # adding checkpoint handler to save models (network params and optimizer stats) during training
-        checkpoint_handler = CheckpointSaver(logdir, {'net': net, 'opt': opt, 'trainer': trainer}, n_saved=10, save_final=True,
+        checkpoint_handler = CheckpointSaver(str(logdir), {'net': net, 'opt': opt, 'trainer': trainer}, n_saved=10,
+                                             save_final=True,
                                              epoch_level=True, save_interval=200)
         checkpoint_handler.attach(trainer)
 
@@ -263,10 +238,7 @@ class DeepMitral:
             output_transform=lambda x: x[0]['loss'])
         train_stats_handler.attach(trainer)
 
-        test = monai.utils.first(loader)['image']
-
         tb_writer = SummaryWriter(log_dir=str(logdir))
-        # tb_writer.add_graph(net, monai.utils.first(loader)['image'].to(cls.device).as_tensor())
 
         # TensorBoardStatsHandler plots loss at every iteration and plots metrics at every epoch, same as StatsHandler
         train_tensorboard_stats_handler = TensorBoardStatsHandler(
@@ -276,17 +248,17 @@ class DeepMitral:
         train_tensorboard_stats_handler.attach(trainer)
 
         # Set up validation step
-        val_loader = cls.load_val_data(dataPath)
+        val_loader = cls.load_val_data(data_path)
 
         evaluator = SupervisedEvaluator(
             device=cls.device,
             val_data_loader=val_loader,
             network=net,
             inferer=SlidingWindowInferer((96, 96, 96), sw_batch_size=6),
-            # decollate=False,
             key_val_metric={"val_meandice": MeanDice(output_transform=cls.output_tform, include_background=False)},
             additional_metrics={
-                'HausdorffDistance': HausdorffDistance(percentile=95, output_transform=cls.output_tform, include_background=False),
+                'HausdorffDistance': HausdorffDistance(percentile=95, output_transform=cls.output_tform,
+                                                       include_background=False),
                 'AvgSurfaceDistance': SurfaceDistance(output_transform=cls.output_tform, include_background=False)},
         )
 
@@ -300,18 +272,8 @@ class DeepMitral:
         val_tensorboard_stats_handler = TensorBoardStatsHandler(
             summary_writer=tb_writer,
             output_transform=lambda x: None,  # no need to plot loss value, so disable per iteration output
-            global_epoch_transform=lambda x: trainer.state.epoch,)  # fetch global epoch number from trainer
+            global_epoch_transform=lambda x: trainer.state.epoch, )  # fetch global epoch number from trainer
         val_tensorboard_stats_handler.attach(evaluator)
-
-        # add handler to draw the first image and the corresponding label and model output in the last batch
-        # here we draw the 3D output as GIF format along Depth axis, at every validation epoch
-        # val_tensorboard_image_handler = TensorBoardImageHandler(
-        #     summary_writer=tb_writer,
-        #     batch_transform=lambda batch: (list_data_collate(batch)["image"], list_data_collate(batch)["label"]),
-        #     output_transform=lambda output: predict_segmentation(list_data_collate(output)['pred'], mutually_exclusive=True),
-        #     global_iter_transform=lambda x: trainer.state.epoch
-        # )
-        # val_tensorboard_image_handler.attach(evaluator)
 
         val_handler = ValidationHandler(
             validator=evaluator,
@@ -379,7 +341,6 @@ class DeepMitral:
         print("Metric Mean_SD: {}".format(sd.aggregate().item() * cls.spacing))
         print("Elapsed Time: {}s".format(end - start))
 
-
     @classmethod
     def segment(cls, load_checkpoint, data):
         config.print_config()
@@ -404,14 +365,14 @@ class DeepMitral:
         with torch.no_grad():
             for batch in loader:
                 with torch.cuda.amp.autocast():
-                    out = sliding_window_inference(batch['image'].to(device), (96,96,96), 16, net)
+                    out = sliding_window_inference(batch['image'].to(device), (96, 96, 96), 16, net)
                 out = cls.post_tform(decollate_batch({'pred': out}))
                 meta_dict = decollate_batch(batch["image_meta_dict"])
                 for o, m in zip(out, meta_dict):
                     saver(pred(o['pred']), m)
 
     @classmethod
-    def handle_sigint(cls, signum, frame):
+    def handle_sigint(cls, *_):
         if cls.trainer:
             msg = "Ctrl-c was pressed. Stopping run at epoch {}.".format(cls.trainer.state.epoch)
             cls.trainer.should_terminate = True
@@ -423,7 +384,6 @@ class DeepMitral:
         print(msg, flush=True)
 
 
-
 def parse_args():
     parser = argparse.ArgumentParser(description='DeepMV training')
 
@@ -433,19 +393,21 @@ def parse_args():
     train_parse = subparsers.add_parser('train', help="Train the network")
     train_parse.add_argument('-load', type=str, help='load from a given checkpoint')
     train_parse.add_argument('-data', type=str, help='data folder. should contain "train" and "val" sub-folders')
-    train_parse.add_argument('-use_val', action='store_true', help='Flag to indicate that training set should include validation data.')
+    train_parse.add_argument('-use_val', action='store_true',
+                             help='Flag to indicate that training set should include validation data.')
 
     val_parse = subparsers.add_parser('validate', help='Evaluate the network')
     val_parse.add_argument('load', type=str, help='load from a given checkpoint')
     val_parse.add_argument('-data', type=str, help='data folder. should contain "train" and "val" sub-folders')
     val_parse.add_argument('-use_test', action='store_true',
-                             help='Run on test data')
+                           help='Run on test data')
 
     seg_parse = subparsers.add_parser('segment', help='Segment images')
     seg_parse.add_argument('load', type=str, help='load from a given checkpoint')
     seg_parse.add_argument('data', type=str, help='data folder')
 
     return parser.parse_args()
+
 
 def main():
     logging.basicConfig(stream=sys.stdout, level=logging.INFO)
