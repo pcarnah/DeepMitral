@@ -9,7 +9,7 @@ dependencies:
   - python=3.10
   - pip
   - pytorch-cuda=11.8
-  - pytorch=2.0.0
+  - pytorch=1.13.1
   - torchaudio
   - torchvision
   - simpleitk
