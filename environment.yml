@@ -1,0 +1,31 @@
+name: monai11
+channels:
+  - simpleitk/label/dev
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pytorch-cuda=11.8
+  - pytorch=1.13.1
+  - torchaudio
+  - torchvision
+  - simpleitk
+  - monai=1.1.0
+  - scikit-image
+  - nibabel
+  - pillow
+  - einops
+  - ignite
+  - psutil
+  - tqdm
+  - gdown
+  - pandas
+  - python-lmdb
+  - pydicom
+  - pynrrd
+  - transformers
+  - tensorboard=2.10.0
+  - ipython

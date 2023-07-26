@@ -4,7 +4,10 @@ Deep learning based mitral valve segmentation based on 3D Residual UNet from the
 
 Carnahan, P., Moore, J., Bainbridge, D., Eskandari, M., Chen, E.C.S., Peters, T.M. (2021). DeepMitral: Fully Automatic 3D Echocardiography Segmentation for Patient Specific Mitral Valve Modelling. In: , et al. Medical Image Computing and Computer Assisted Intervention – MICCAI 2021. MICCAI 2021. Lecture Notes in Computer Science, vol 12905. Springer, Cham. https://doi.org/10.1007/978-3-030-87240-3_44
 
-Trained and tested on MONAI version 0.7 and PyTorch version 1.8.2
+Trained and tested on MONAI version 1.1 and PyTorch version 1.13.1
+
+
+An Anaconda environment.yml file has been included with the requirements for DeepMitral.
 
 ### Usage Examples
 #### Data Format
@@ -28,7 +31,7 @@ data
 |   |-- 033-00-US.nii
 ```
 
-Output from both training and validation will be saved in a directory "runs" created in the wokring directory from which DeepMitral is called.
+Output from both training and validation will be saved in a directory "runs" created in the data directory algongside train, test and val.
 
 #### Training from epoch 0
 
