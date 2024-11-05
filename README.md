@@ -18,6 +18,8 @@ Details can be found here: https://www.synapse.org/MVSeg2023
 
 Dataset is hosted here: https://huggingface.co/datasets/pcarnahan/MVSeg2023
 
+##### Note that the dataset was released with annotation for seperate classes for each leafet, while the code and model included here are trained on a combined single class for both leaflets.
+
 ### Usage Examples
 #### Data Format
 Data is expected to be structured using 3 subfolders, train, test, val. Images are expected to having matching names for imaage and correspodning label, with images ending in US and labels ending in label. File format should be .nii. An example of the data structure is here:
