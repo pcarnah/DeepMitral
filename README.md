@@ -1,3 +1,5 @@
+
+
 # DeepMitral
 Deep learning based mitral valve segmentation based on 3D Residual UNet from the MONAI framework (https://monai.io/)
 
@@ -6,8 +8,15 @@ Carnahan, P., Moore, J., Bainbridge, D., Eskandari, M., Chen, E.C.S., Peters, T.
 
 Trained and tested on MONAI version 1.1 and PyTorch version 1.13.1
 
-
 An Anaconda environment.yml file has been included with the requirements for DeepMitral.
+
+### MVSeg2023 MICCAI Challenge
+
+Data derived from this work was released publically thorugh an open challenge at the MICCAI2023 conference. 
+
+Details can be found here: https://www.synapse.org/MVSeg2023
+
+Dataset is hosted here: https://huggingface.co/datasets/pcarnahan/MVSeg2023
 
 ### Usage Examples
 #### Data Format
