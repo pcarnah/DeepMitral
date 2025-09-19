@@ -1,4 +1,5 @@
 import argparse
+from datetime import datetime
 import logging
 import os
 import platform
@@ -8,6 +9,10 @@ import signal
 import sys
 from pathlib import Path
 from timeit import default_timer as timer
+try:
+    import comet_ml
+except Exception as e:
+    pass
 
 import numpy as np
 import torch
@@ -37,6 +42,7 @@ from monai.transforms import (Compose, LoadImaged, Orientationd,
                               KeepLargestConnectedComponentd, SaveImage,
                               AsDiscrete, CenterSpatialCropd,
                               ClassesToIndicesd, RandCropByLabelClassesd)
+from monai.utils import is_scalar
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.tensorboard import SummaryWriter
@@ -47,9 +53,9 @@ class DeepMitral:
     spacing = 0.3
     train_epochs = 800
     n_classes = 2
-    batch_size = 12
+    batch_size = 2
     n_samples = 4
-    patch_size = (128,128,128)
+    patch_size = (96,96,96)
 
     keys = ("image", "label")
     train_tform = Compose([
@@ -139,19 +145,19 @@ class DeepMitral:
             num_workers = 0
         else:
             num_workers = os.cpu_count()
-        # data_set = Dataset(data, cls.train_tform)
-        data_set = CacheDataset(data, cls.train_tform,
-                                num_workers=None,
-                                as_contiguous=True,
-                                copy_cache=True,
-                                runtime_cache=False)
+        data_set = Dataset(data, cls.train_tform)
+        # data_set = CacheDataset(data, cls.train_tform,
+        #                         num_workers=None,
+        #                         as_contiguous=True,
+        #                         copy_cache=True,
+        #                         runtime_cache=False)
         # loader = DataLoader(data_set, batch_size=cls.batch_size, shuffle=True,
         #                     num_workers=0, drop_last=True,
         #                     pin_memory=False)
 
         loader = ThreadDataLoader(data_set, batch_size=cls.batch_size, shuffle=True,
-                            num_workers=1, drop_last=True, use_thread_workers=False,
-                            pin_memory=False, repeats=3, buffer_size=1)
+                            num_workers=8, drop_last=True, use_thread_workers=False,
+                            pin_memory=True, repeats=2, buffer_size=1)
 
         return loader
 
@@ -167,6 +173,7 @@ class DeepMitral:
         segs = sorted(str(p.absolute()) for p in path.glob("*label.nii*"))
         data = [{"image": im, "label": seg} for im, seg in zip(images, segs)]
 
+        # data_set = Dataset(data, cls.val_tform)
         data_set = CacheDataset(data, cls.val_tform, num_workers=None,
                                 as_contiguous=True,
                                 copy_cache=True)
@@ -177,8 +184,8 @@ class DeepMitral:
         # else:
         #     data_set = Dataset(data, cls.val_tform)
         loader = DataLoader(data_set, batch_size=1, shuffle=False,
-                            num_workers=0,
-                            pin_memory=False)
+                            num_workers=8,
+                            pin_memory=True)
 
         return loader
 
@@ -275,14 +282,25 @@ class DeepMitral:
 
         else:
             logdir = Path(data_path).joinpath('runs')
-            dirs = sorted(
-                [int(x.name) for x in logdir.iterdir() if x.is_dir()])
-            if not dirs:
-                logdir = logdir.joinpath('0')
-            else:
-                logdir = logdir.joinpath(str(int(dirs[-1]) + 1))
+            proj_name = "{}_{}_{}".format(os.environ.get('SLURM_JOB_NAME', 'job'),
+                                          os.environ.get('SLURM_JOB_ID', '0'),
+                                          datetime.now().strftime("%b%d_%H-%M-%S"),
+                                          )
+            logdir = logdir.joinpath(proj_name)
             logdir.mkdir(parents=True, exist_ok=True)
             shutil.copy(str(Path(__file__)), str(logdir.joinpath('deepmitral.py')))
+
+        comet_logger = None
+        if os.environ.get('COMET_API_KEY', False):
+            try:
+                cfg = comet_ml.ExperimentConfig(name=proj_name, auto_metric_logging=False,
+                                                tags=[os.environ.get('SLURM_JOB_NAME', 'default')])
+                comet_logger = comet_ml.start(project_name='deepmitral', experiment_config=cfg)
+            except Exception as e:
+                print("Couldn't enable CometML Tracking", e)
+
+        comet_logger.train()
+        comet_logger.log_code(str(Path(__file__)))
 
         # Adaptive learning rate
         lr_scheduler = StepLR(opt, 5, 0.985)
@@ -359,9 +377,32 @@ class DeepMitral:
 
         val_handler = ValidationHandler(
             validator=evaluator,
-            interval=10
+            interval=1
         )
         val_handler.attach(trainer)
+
+        # Set up Comet logging
+        if comet_logger is not None:
+            @trainer.on(Events.ITERATION_COMPLETED(every=1))
+            def log_comet(engine):
+                comet_logger.log_metric('loss', engine.state.output[0]['loss'], step=engine.state.iteration,
+                                        epoch=engine.state.epoch)
+
+            @trainer.on(Events.EPOCH_COMPLETED(every=1))
+            def log_comet_epoch(engine):
+                current_epoch = engine.state.epoch
+                summary_dict = engine.state.metrics
+                for name, value in summary_dict.items():
+                    if is_scalar(value):
+                        comet_logger.log_metric(name, value, step=engine.state.iteration, epoch=engine.state.epoch)
+
+            @evaluator.on(Events.EPOCH_COMPLETED(every=1))
+            def log_comet_epoch(engine):
+                current_epoch = engine.state.epoch
+                summary_dict = engine.state.metrics
+                for name, value in summary_dict.items():
+                    if is_scalar(value):
+                        comet_logger.log_metric(name, value, step=engine.state.iteration, epoch=engine.state.epoch)
 
         logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
@@ -375,7 +416,7 @@ class DeepMitral:
 
 
 
-        set_track_meta(False)
+        set_track_meta(True)
         trainer.run()
 
         # Stop recording memory snapshot history.
