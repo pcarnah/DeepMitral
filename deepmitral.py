@@ -173,10 +173,10 @@ class DeepMitral:
         segs = sorted(str(p.absolute()) for p in path.glob("*label.nii*"))
         data = [{"image": im, "label": seg} for im, seg in zip(images, segs)]
 
-        # data_set = Dataset(data, cls.val_tform)
-        data_set = CacheDataset(data, cls.val_tform, num_workers=None,
-                                as_contiguous=True,
-                                copy_cache=True)
+        data_set = Dataset(data, cls.val_tform)
+        # data_set = CacheDataset(data, cls.val_tform, num_workers=None,
+        #                         as_contiguous=True,
+        #                         copy_cache=True)
         # if persistent and not test:
         #     persistent_cache = Path("./persistent_cache")
         #     persistent_cache.mkdir(parents=True, exist_ok=True)
@@ -377,7 +377,7 @@ class DeepMitral:
 
         val_handler = ValidationHandler(
             validator=evaluator,
-            interval=1
+            interval=10
         )
         val_handler.attach(trainer)
 
