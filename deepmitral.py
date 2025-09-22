@@ -11,6 +11,7 @@ from pathlib import Path
 from timeit import default_timer as timer
 try:
     import comet_ml
+    from comet_ml.integration.pytorch import watch
 except Exception as e:
     pass
 
@@ -32,7 +33,7 @@ from monai.losses import DiceCELoss, GeneralizedDiceFocalLoss
 from monai.metrics import (GeneralizedDiceScore, HausdorffDistanceMetric,
                            SurfaceDistanceMetric)
 from monai.networks.layers import Norm
-from monai.networks.nets import UNet, FlexibleUNet
+from monai.networks.nets import UNet, FlexibleUNet, SegResNet
 from monai.optimizers import Novograd
 from monai.transforms import (Compose, LoadImaged, Orientationd,
                               ScaleIntensityd,
@@ -115,12 +116,23 @@ class DeepMitral:
     device = torch.device(
         'cuda:0') if torch.cuda.is_available() else torch.device('cpu')
 
-    model = UNet(spatial_dims=3, in_channels=1, out_channels=n_classes,
-                 channels=(16, 32, 64, 128, 256),
-                 strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH,
-                 dropout=0).to(device)
 
-    # model = FlexibleUNet(1, 2, 'efficientnet-b0', spatial_dims=3, act='memswish', upsample='deconv').to(device)
+    model_defs = dict(
+        unet = UNet(spatial_dims=3, in_channels=1, out_channels=n_classes,
+                     channels=(16, 32, 64, 128, 256),
+                     strides=(2, 2, 2, 2), num_res_units=2, norm=Norm.BATCH,
+                     dropout=0).to(device),
+        segresnet = SegResNet(spatial_dims=3, in_channels=1, out_channels=n_classes,
+                     upsample_mode='deconv').to(device),
+        effnetb0 = FlexibleUNet(1, 2, 'efficientnet-b0', spatial_dims=3, act='memswish', upsample='deconv').to(device),
+        effnetb2 = FlexibleUNet(1, 2, 'efficientnet-b2', spatial_dims=3, act='memswish', upsample='deconv').to(device),
+        effnetb4 = FlexibleUNet(1, 2, 'efficientnet-b4', spatial_dims=3, act='memswish', upsample='deconv').to(device),
+        flexresnet50 = FlexibleUNet(1, 2, 'resnet50', spatial_dims=3, upsample='deconv').to(device),
+        flexresnet101 = FlexibleUNet(1, 2, 'resnet101', spatial_dims=3, upsample='deconv').to(device),
+        flexresnet152 = FlexibleUNet(1, 2, 'resnet152', spatial_dims=3, upsample='deconv').to(device),
+    )
+
+    model = model_defs['unet']
 
     trainer = None
 
@@ -242,13 +254,13 @@ class DeepMitral:
         trainable_params = sum(p.numel() for p in net.parameters() if p.requires_grad)
         print("Number of trainable parameters: {}".format(trainable_params))
 
-        # loss = DiceCELoss(softmax=True, include_background=True,
-        #                   lambda_dice=0.5)
+        loss = DiceCELoss(softmax=True, include_background=True,
+                          lambda_dice=0.5)
 
-        gdf_loss = GeneralizedDiceFocalLoss(softmax=True)
+        # loss = GeneralizedDiceFocalLoss(softmax=True)
 
-        opt = Novograd(net.parameters(), 1e-2, weight_decay=1e-2, eps=1e-7)
-        # opt = AdamW(net.parameters(), lr=1e-3, eps=1e-7, amsgrad=False, fused=True)
+        # opt = Novograd(net.parameters(), 1e-2, weight_decay=1e-2, eps=1e-7)
+        opt = AdamW(net.parameters(), lr=1e-3, eps=1e-7, amsgrad=False, fused=True)
 
         trainer = SupervisedTrainer(
             device=cls.device,
@@ -257,7 +269,7 @@ class DeepMitral:
             train_data_loader=loader,
             network=net,
             optimizer=opt,
-            loss_function=gdf_loss.forward,
+            loss_function=loss.forward,
             # decollate=False,
             key_train_metric={
                 "train_meandice": MeanDice(output_transform=cls.output_tform)},
@@ -299,11 +311,12 @@ class DeepMitral:
                 cfg = comet_ml.ExperimentConfig(name=proj_name, auto_metric_logging=False,
                                                 tags=[os.environ.get('SLURM_JOB_NAME', 'default')])
                 comet_logger = comet_ml.start(project_name='deepmitral', experiment_config=cfg)
+                comet_logger.train()
+                comet_logger.log_code(str(Path(__file__)))
+                watch(net)
             except Exception as e:
                 print("Couldn't enable CometML Tracking", e)
 
-        comet_logger.train()
-        comet_logger.log_code(str(Path(__file__)))
 
         # Adaptive learning rate
         lr_scheduler = StepLR(opt, 5, 0.985)
@@ -554,6 +567,9 @@ class DeepMitral:
 def parse_args():
     parser = argparse.ArgumentParser(description='DeepMV training')
 
+    parser.add_argument('-model', type=str, default='unet',
+                        help='model name. Available options are "unet", "segresnet", "effnetb0", "effnetb2", "effnetb4", "flexresnet50", "flexresnet101", "flexresnet152"')
+
     subparsers = parser.add_subparsers(help='sub-command help', dest='mode')
     subparsers.required = True
 
@@ -596,6 +612,11 @@ def main():
     signal.signal(signal.SIGINT, DeepMitral.handle_sigint)
     start = timer()
     args = parse_args()
+
+    if args.model not in DeepMitral.model_defs:
+        raise ValueError("Model {} not supported".format(args.model))
+    DeepMitral.model =  DeepMitral.model_defs[args.model]
+
     if args.mode == 'validate':
         DeepMitral.validate(args.load, args.data, args.use_test)
     elif args.mode == 'train':
