@@ -53,7 +53,7 @@ class DeepMitral:
     spacing = 0.3
     train_epochs = 800
     n_classes = 2
-    batch_size = 2
+    batch_size = 12
     n_samples = 4
     patch_size = (96,96,96)
 
@@ -225,7 +225,7 @@ class DeepMitral:
         return xt['pred'].detach(), xt['label'].detach()
 
     @classmethod
-    def train(cls, data, use_val=False, load_checkpoint=None):
+    def train(cls, data, use_val=False, load_checkpoint=None, logdir=None):
         #config.print_config()
         # torch.cuda.memory._record_memory_history(max_entries=100000)
 
@@ -247,8 +247,8 @@ class DeepMitral:
 
         gdf_loss = GeneralizedDiceFocalLoss(softmax=True)
 
-        # opt = Novograd(net.parameters(), 1e-2, weight_decay=1e-2, eps=1e-7)
-        opt = AdamW(net.parameters(), lr=1e-3, eps=1e-7, amsgrad=False, fused=True)
+        opt = Novograd(net.parameters(), 1e-2, weight_decay=1e-2, eps=1e-7)
+        # opt = AdamW(net.parameters(), lr=1e-3, eps=1e-7, amsgrad=False, fused=True)
 
         trainer = SupervisedTrainer(
             device=cls.device,
@@ -281,7 +281,10 @@ class DeepMitral:
             logdir = Path(load_checkpoint).parent
 
         else:
-            logdir = Path(data_path).joinpath('runs')
+            if logdir is None:
+                logdir = Path(data_path).joinpath('runs')
+            else:
+                logdir = Path(logdir)
             proj_name = "{}_{}_{}".format(os.environ.get('SLURM_JOB_NAME', 'job'),
                                           os.environ.get('SLURM_JOB_ID', '0'),
                                           datetime.now().strftime("%b%d_%H-%M-%S"),
@@ -377,7 +380,7 @@ class DeepMitral:
 
         val_handler = ValidationHandler(
             validator=evaluator,
-            interval=10
+            interval=5
         )
         val_handler.attach(trainer)
 
@@ -402,7 +405,7 @@ class DeepMitral:
                 summary_dict = engine.state.metrics
                 for name, value in summary_dict.items():
                     if is_scalar(value):
-                        comet_logger.log_metric(name, value, step=engine.state.iteration, epoch=engine.state.epoch)
+                        comet_logger.log_metric(name, value, step=trainer.state.iteration, epoch=trainer.state.epoch)
 
         logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
@@ -563,6 +566,8 @@ def parse_args():
     train_parse.add_argument('-use_val', action='store_true',
                              help='Flag to indicate that training set should '
                                   'include validation data.')
+    train_parse.add_argument('-logdir', type=str, default=None,
+                             help='Optional logging folder. Defaults to data_folder/runs')
 
     val_parse = subparsers.add_parser('validate', help='Evaluate the network')
     val_parse.add_argument('load', type=str,
@@ -594,7 +599,7 @@ def main():
     if args.mode == 'validate':
         DeepMitral.validate(args.load, args.data, args.use_test)
     elif args.mode == 'train':
-        DeepMitral.train(args.data, args.use_val, args.load)
+        DeepMitral.train(args.data, args.use_val, args.load, args.logdir)
     elif args.mode == 'segment':
         DeepMitral.segment(args.load, args.data)
     end = timer()
